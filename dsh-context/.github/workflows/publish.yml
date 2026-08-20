@@ -1,0 +1,91 @@
+name: Publish package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify, pack, and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Update npm for trusted publishing
+        run: npm install --global npm@latest
+
+      - name: Verify release tag matches package version
+        shell: bash
+        run: |
+          package_version="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').version)")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME does not match package version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build package
+        run: npm run build
+
+      - name: Pack release tarball
+        id: pack
+        shell: bash
+        run: |
+          mkdir -p dist
+          tarball="$(npm pack --pack-destination dist)"
+          test -f "dist/$tarball"
+          echo "path=dist/$tarball" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: npm-package-${{ github.ref_name }}
+          path: ${{ steps.pack.outputs.path }}
+          if-no-files-found: error
+
+      - name: Attach tarball to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "${{ steps.pack.outputs.path }}" --clobber
+
+      - name: Check whether this npm version already exists
+        id: npm-version
+        shell: bash
+        run: |
+          package_name="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').name)")"
+          package_version="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').version)")"
+          if npm view "$package_name@$package_version" version --json >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.npm-version.outputs.exists != 'true'
+        run: npm publish "$GITHUB_WORKSPACE/${{ steps.pack.outputs.path }}"

@@ -1,0 +1,8 @@
+- insert:
+    - id: context-engineer
+      name: '@sugarforever/dsh-context'
+      disabled: false
+      config:
+        maxMessages: 24
+        maxSummaryLength: 500
+        maxTurnsPerSummary: 2

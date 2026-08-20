@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.dependencies }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dependencies: [locked, latest-harness]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install latest Harness packages
+        if: matrix.dependencies == 'latest-harness'
+        shell: bash
+        run: |
+          dsh_version="$(npm view @deepseek-ai/dsh@latest version)"
+          echo "Testing against Harness $dsh_version"
+          npm install --no-save --package-lock=false \
+            "@deepseek-ai/dsh-agent@$dsh_version" \
+            "@deepseek-ai/dsh-agent-default-model@$dsh_version" \
+            "@deepseek-ai/dsh-agent-presets@$dsh_version" \
+            "@deepseek-ai/dsh-client-ui-primitives@$dsh_version" \
+            "@deepseek-ai/dsh-credentials@$dsh_version" \
+            "@deepseek-ai/dsh-host-webserver@$dsh_version" \
+            "@deepseek-ai/dsh-llm@$dsh_version" \
+            "@deepseek-ai/dsh-session@$dsh_version" \
+            "@deepseek-ai/dsh-session-persistence@$dsh_version" \
+            "@deepseek-ai/dsh-settings@$dsh_version" \
+            "@deepseek-ai/dsh-workspace@$dsh_version"
+
+      - name: Run tests
+        run: npm test
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build package
+        run: npm run build
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
