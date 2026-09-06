@@ -1,6 +1,6 @@
 # dsh-zvec-grep
 
-Automatic semantic workspace search for DeepSeek Harness, powered by Alibaba zvec and the public zvec-grep engine API.
+Automatic semantic workspace search for DeepSeek Harness, powered by Alibaba [zvec](https://github.com/alibaba/zvec) and the public [zvec-grep](https://github.com/zvec-ai/zvec-grep) engine API.
 
 ## One-command setup
 
@@ -87,4 +87,4 @@ Push a tag matching the package version, for example `dsh-zvec-grep-v0.1.0`, or 
 
 ## License
 
-MIT. zvec-grep and zvec are separate Apache-2.0 projects distributed by their respective maintainers.
+MIT. [zvec-grep](https://github.com/zvec-ai/zvec-grep) and [zvec](https://github.com/alibaba/zvec) are separate Apache-2.0 projects distributed by their respective maintainers.
