@@ -1,0 +1,102 @@
+name: Publish dsh-zvec-grep
+
+on:
+  push:
+    tags:
+      - 'dsh-zvec-grep-v*'
+  workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: npm distribution tag
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+          - next
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-dsh-zvec-grep-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    working-directory: dsh-zvec-grep
+
+jobs:
+  publish:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    environment: npm
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Update npm for trusted publishing
+        run: npm install --global npm@latest
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          package_version="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').version)")"
+          tag_version="${GITHUB_REF_NAME#dsh-zvec-grep-v}"
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $package_version" >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test -- --run
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build package
+        run: npm run build
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
+      - name: Check whether this version already exists
+        id: npm-version
+        shell: bash
+        run: |
+          package_name="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').name)")"
+          package_version="$(node --input-type=commonjs --eval "process.stdout.write(require('./package.json').version)")"
+          if npm view "$package_name@$package_version" version --json >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish package
+        if: steps.npm-version.outputs.exists != 'true'
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TAG: ${{ inputs.npm_tag || 'latest' }}
+        run: |
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            npm config delete //registry.npmjs.org/:_authToken
+          fi
+          npm publish --access public --provenance --tag "$NPM_TAG"
+
+      - name: Report existing version
+        if: steps.npm-version.outputs.exists == 'true'
+        run: echo "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version") is already published."

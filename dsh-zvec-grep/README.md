@@ -1,0 +1,90 @@
+# dsh-zvec-grep
+
+Automatic semantic workspace search for DeepSeek Harness, powered by Alibaba zvec and the public zvec-grep engine API.
+
+## One-command setup
+
+```bash
+npx @deepseek-ai/dsh plugin --profile web add @sugarforever/dsh-zvec-grep
+npx @deepseek-ai/dsh web
+```
+
+That is the complete setup. Do not run `zg install`, `zg index`, or start an MCP server.
+
+When Harness creates or resumes a session, the plugin reads the workspace from the immutable `session.header.cwd`, starts a file watcher, and builds the initial index in the background. Search never waits for indexing and never triggers an update. If the index is busy or unavailable, `zvec_search` returns a structured `indexing`, `refreshing`, or `error` status so the Agent or user can decide whether to retry later or use exact grep.
+
+Added, changed, and deleted paths are debounced and submitted to zvec-grep's incremental index API in the background. An hourly full reconciliation repairs drift if the operating-system watcher missed an event.
+
+The Harness workspace also gets a **Zvec index** status pill. It reports `Indexing`, `Refreshing`, `Ready`, or `Error` without blocking search. Select the pill to see the active workspace and pending change count. The UI is installed with the plugin; there is no separate frontend setup.
+
+The first workspace may download the default local embedding model. Indexes are stored under `<workspace>/.zvec-grep/` and are excluded from their own scans. Add `.zvec-grep/` to the repository ignore rules if the project does not already ignore local tool state.
+
+## Model-facing tool
+
+`zvec_search` searches the calling session's workspace. A successful call returns `status: ready` plus bounded source excerpts with relative paths, line ranges, freshness, match routes, and scores. Non-ready calls return immediately without partial or silently stale results.
+
+Use it when wording or location is unknown, or when the question requires architecture, relationships, control flow, design rationale, or synthesis across files. Use Harness' exact grep for known identifiers, literals, regular expressions, configuration keys, error messages, and exhaustive occurrence lists.
+
+## Why this embeds zvec-grep instead of wrapping its CLI
+
+The package imports zvec-grep's supported `createZvecGrep()` API directly. It does not spawn `zg`, run a shared daemon, edit another agent's configuration, or bridge through MCP.
+
+This preserves zvec-grep's mature indexing pipeline: Git-aware file discovery, code and document extraction, BM25/full-text and vector retrieval, Reciprocal Rank Fusion, persisted zvec collections, file-level incremental refresh, and local embedding support. Reimplementing directly on lower-level zvec would require owning all those layers again without improving the Harness integration.
+
+## Lifecycle
+
+```text
+DSH bundle installation
+  -> mounts @sugarforever/dsh-zvec-grep
+  -> session/created supplies session.header.cwd
+  -> file watcher and background initial index start automatically
+  -> watcher events are coalesced into index({ changedPaths }) calls
+  -> hourly index() reconciliation compensates for missed events
+  -> zvec_search uses the calling Agent's session cwd
+  -> context(autoUpdate: false) searches only when the index is ready
+  -> plugin disposal closes every workspace engine
+```
+
+Sessions sharing a workspace reuse one in-process engine, watcher, and indexing coordinator. A failed background operation is reported as `status: error`; searches do not implicitly retry or rebuild persistent state.
+
+## Configuration
+
+The bundled defaults work without configuration:
+
+```yaml
+- id: zvec-grep
+  name: '@sugarforever/dsh-zvec-grep'
+  config:
+    embedding: local/potion-code-16m-v2
+    device: auto
+    defaultLimit: 10
+    maxLimit: 30
+    watchDebounceMs: 750
+    reconcileIntervalMs: 3600000
+    statusPollIntervalMs: 2000
+```
+
+Node.js 22 or newer is required. `device` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `reconcileIntervalMs: 0` disables periodic reconciliation; the default is one hour. `statusPollIntervalMs` controls the lightweight workspace-status UI refresh interval and defaults to two seconds.
+
+## Development
+
+```bash
+npm install
+npm test
+npm run typecheck
+npm run build
+npm pack --dry-run
+```
+
+## Publishing
+
+Publishing runs from the repository's `Publish dsh-zvec-grep` GitHub Actions workflow. Configure the `npm` GitHub environment and either:
+
+- add an `NPM_TOKEN` environment secret with publish access to the `@sugarforever` scope (needed for the first publish unless npm already allows a trusted publisher), or
+- configure npm Trusted Publishing for repository `sugarforever/dsh-plugins` and workflow `publish-dsh-zvec-grep.yml`.
+
+Push a tag matching the package version, for example `dsh-zvec-grep-v0.1.0`, or run the workflow manually. The workflow verifies, builds, inspects, and publishes the package with npm provenance. Existing versions are left unchanged.
+
+## License
+
+MIT. zvec-grep and zvec are separate Apache-2.0 projects distributed by their respective maintainers.

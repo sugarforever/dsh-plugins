@@ -1,1 +1,3 @@
 */node_modules
+**/.zvec-grep/
+.DS_Store
