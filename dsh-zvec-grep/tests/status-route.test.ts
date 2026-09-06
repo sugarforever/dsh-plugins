@@ -38,4 +38,24 @@ describe('status route', () => {
       status: { status: 'error', pendingChanges: 0, updatedAt: 42, errorCode: 'index_failed' },
     })
   })
+
+  it('reports a known session as indexing while its runtime is still activating', async () => {
+    let route!: { fetch: (request: Request) => Promise<Response> }
+    const register = vi.fn((next: typeof route) => { route = next; return vi.fn() })
+    registerStatusRoute(
+      { register } as never,
+      { statusFor: vi.fn(() => undefined) } as never,
+      { list: () => [{ id: 'session-1', header: { cwd: '/repo' } }] },
+      2000,
+    )
+
+    const response = await route.fetch(new Request('http://localhost/api/dsh-zvec-grep/status?sessionId=session-1'))
+
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({
+      version: 1,
+      pollIntervalMs: 2000,
+      status: { status: 'indexing', pendingChanges: 0, updatedAt: 0 },
+    })
+  })
 })

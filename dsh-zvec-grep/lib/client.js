@@ -250,13 +250,18 @@ var IndexStatusSource = class {
 		let nextDelay = ERROR_RETRY_MS;
 		try {
 			const response = await this.fetchStatus(sessionId);
-			if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`);
-			const payload = parsePayload(await response.json());
-			nextDelay = Math.max(250, payload.pollIntervalMs);
-			if (this.running && this.generation === generation) this.publish(Object.freeze({
-				connection: "ready",
-				status: payload.status
-			}));
+			if (response.status === 404) {
+				nextDelay = 250;
+				if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT);
+			} else {
+				if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`);
+				const payload = parsePayload(await response.json());
+				nextDelay = Math.max(250, payload.pollIntervalMs);
+				if (this.running && this.generation === generation) this.publish(Object.freeze({
+					connection: "ready",
+					status: payload.status
+				}));
+			}
 		} catch (error) {
 			if (this.running && this.generation === generation) this.publish(Object.freeze({
 				connection: "error",

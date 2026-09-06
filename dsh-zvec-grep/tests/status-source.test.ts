@@ -38,6 +38,22 @@ describe('IndexStatusSource', () => {
     source.stop()
   })
 
+  it('keeps loading and retries quickly when the session is not restored yet', async () => {
+    vi.useFakeTimers()
+    const fetchStatus = vi.fn(async () => new Response('not found', { status: 404 }))
+    const source = new IndexStatusSource(fetchStatus)
+    source.selectSession('session')
+    source.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(source.getSnapshot()).toEqual({ connection: 'loading' })
+    await vi.advanceTimersByTimeAsync(249)
+    expect(fetchStatus).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(fetchStatus).toHaveBeenCalledTimes(2)
+    source.stop()
+  })
+
   it('discards stale A-B-A responses and does not create duplicate polling chains', async () => {
     vi.useFakeTimers()
     const resolvers: Array<(response: Response) => void> = []

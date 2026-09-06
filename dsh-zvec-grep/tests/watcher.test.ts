@@ -1,8 +1,9 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createWorkspaceWatcher } from '../src/watcher.ts'
+import { createWorkspaceWatcher, createWorkspaceWatcherWith, type NativeWatch } from '../src/watcher.ts'
 
 const roots: string[] = []
 
@@ -11,6 +12,34 @@ afterEach(async () => {
 })
 
 describe('createWorkspaceWatcher', () => {
+  it('uses one recursive native watcher and filters hard-excluded paths', async () => {
+    const native = new EventEmitter() as EventEmitter & { close(): void }
+    native.close = vi.fn()
+    let listener: Parameters<NativeWatch>[2] | undefined
+    const watch = vi.fn<NativeWatch>((_root, _options, next) => {
+      listener = next
+      return native as never
+    })
+    const change = vi.fn()
+    const error = vi.fn()
+    const watcher = createWorkspaceWatcherWith('/repo', { change, error }, watch as never)
+
+    expect(watch).toHaveBeenCalledOnce()
+    expect(watch).toHaveBeenCalledWith('/repo', { recursive: true }, expect.any(Function))
+    expect(listener).toBeTypeOf('function')
+    listener!('change', 'src/index.ts')
+    listener!('change', '.git/index')
+    listener!('change', 'node_modules/pkg/index.js')
+    listener!('change', '.zvec-grep/manifest.json')
+    listener!('change', null)
+
+    expect(change).toHaveBeenCalledOnce()
+    expect(change).toHaveBeenCalledWith(join('/repo', 'src/index.ts'))
+    expect(error).not.toHaveBeenCalled()
+    await watcher.close()
+    expect(native.close).toHaveBeenCalledOnce()
+  })
+
   it('reports workspace changes but ignores index storage', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-zvec-watcher-'))
     roots.push(root)

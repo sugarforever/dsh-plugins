@@ -1,9 +1,8 @@
 import z from "@deepseek-ai/schemastery";
 import { createZvecGrep } from "@zvec/zvec-grep";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { realpathSync, watch } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
-import { watch } from "chokidar";
 
 //#region src/runtime.ts
 const statusMessages = {
@@ -302,32 +301,29 @@ function createSearchTool(runtime, config) {
 
 //#endregion
 //#region src/watcher.ts
-function createWorkspaceWatcher(root, callbacks) {
-	const watcher = watch(root, {
-		ignoreInitial: true,
-		ignored: /(^|[/\\])(?:\.git|\.zvec-grep|node_modules)(?:[/\\]|$)/
+const HARD_EXCLUDED = /(^|[/\\])(?:\.git|\.zvec-grep|node_modules)(?:[/\\]|$)/;
+function changedPath(root, filename) {
+	if (filename === null) return void 0;
+	const name$1 = filename.toString();
+	if (!name$1 || HARD_EXCLUDED.test(name$1)) return void 0;
+	const absolutePath = isAbsolute(name$1) ? resolve(name$1) : resolve(root, name$1);
+	const pathFromRoot = relative(root, absolutePath);
+	if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`)) return void 0;
+	return absolutePath;
+}
+function createWorkspaceWatcherWith(root, callbacks, nativeWatch) {
+	const watcher = nativeWatch(root, { recursive: true }, (_eventType, filename) => {
+		const path = changedPath(root, filename);
+		if (path !== void 0) callbacks.change(path);
 	});
-	let settleReady;
-	const ready = new Promise((resolve$1) => {
-		settleReady = resolve$1;
-	});
-	watcher.once("ready", settleReady);
-	watcher.on("add", (path) => callbacks.change(path));
-	watcher.on("change", (path) => callbacks.change(path));
-	watcher.on("unlink", (path) => callbacks.change(path));
-	watcher.on("addDir", (path) => callbacks.change(path));
-	watcher.on("unlinkDir", (path) => callbacks.change(path));
-	watcher.on("error", (error) => {
-		settleReady();
-		callbacks.error(error);
-	});
+	watcher.on("error", callbacks.error);
 	return {
-		ready,
-		close: () => {
-			settleReady();
-			return watcher.close();
-		}
+		ready: Promise.resolve(),
+		close: () => watcher.close()
 	};
+}
+function createWorkspaceWatcher(root, callbacks) {
+	return createWorkspaceWatcherWith(root, callbacks, watch);
 }
 
 //#endregion
@@ -343,8 +339,11 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
 			const root = sessions.list().find((item) => String(item.id) === sessionId)?.header.cwd;
 			if (!root) return new Response("not found", { status: 404 });
 			const internal = runtime.statusFor(root);
-			if (internal === void 0) return new Response("not found", { status: 404 });
-			const status = {
+			const status = internal === void 0 ? {
+				status: "indexing",
+				pendingChanges: 0,
+				updatedAt: 0
+			} : {
 				status: internal.status,
 				pendingChanges: internal.pendingChanges,
 				updatedAt: internal.updatedAt,
@@ -354,10 +353,13 @@ function registerStatusRoute(connection, runtime, sessions, pollIntervalMs) {
 				version: 1,
 				pollIntervalMs,
 				status
-			}), { headers: {
-				"content-type": "application/json; charset=utf-8",
-				"cache-control": "no-store"
-			} });
+			}), {
+				status: internal === void 0 ? 202 : 200,
+				headers: {
+					"content-type": "application/json; charset=utf-8",
+					"cache-control": "no-store"
+				}
+			});
 		}
 	});
 }

@@ -19,8 +19,11 @@ export function registerStatusRoute(
       const root = session?.header.cwd
       if (!root) return new Response('not found', { status: 404 })
       const internal = runtime.statusFor(root)
-      if (internal === undefined) return new Response('not found', { status: 404 })
-      const status = {
+      const status = internal === undefined ? {
+        status: 'indexing',
+        pendingChanges: 0,
+        updatedAt: 0,
+      } : {
         status: internal.status,
         pendingChanges: internal.pendingChanges,
         updatedAt: internal.updatedAt,
@@ -30,7 +33,7 @@ export function registerStatusRoute(
         version: 1,
         pollIntervalMs,
         status,
-      }), { headers: {
+      }), { status: internal === undefined ? 202 : 200, headers: {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
       } })
