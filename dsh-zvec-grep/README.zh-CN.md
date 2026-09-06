@@ -79,13 +79,4 @@ npm run build
 npm pack --dry-run
 ```
 
-## 发布
-
-发布由仓库中的 `Publish dsh-zvec-grep` GitHub Actions workflow 完成。先创建名为 `npm` 的 GitHub Environment，然后选择以下一种认证方式：
-
-- 在该 Environment 中添加具备 `@sugarforever` scope 发布权限的 `NPM_TOKEN` secret；首次发布通常需要这种方式。
-- 在 npm 中为仓库 `sugarforever/dsh-plugins`、workflow `publish-dsh-zvec-grep.yml` 配置 Trusted Publishing。
-
-推送与版本一致的标签（例如 `dsh-zvec-grep-v0.1.0`），或者在 Actions 页面手动运行 workflow。流程会依次测试、类型检查、构建、检查发布内容，并通过 npm provenance 发布；已经存在的版本不会重复发布。
-
 本插件采用 MIT 许可证。[zvec-grep](https://github.com/zvec-ai/zvec-grep) 与 [zvec](https://github.com/alibaba/zvec) 是由各自维护者发布的 Apache-2.0 项目。

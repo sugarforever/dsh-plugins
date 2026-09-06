@@ -76,15 +76,6 @@ npm run build
 npm pack --dry-run
 ```
 
-## Publishing
-
-Publishing runs from the repository's `Publish dsh-zvec-grep` GitHub Actions workflow. Configure the `npm` GitHub environment and either:
-
-- add an `NPM_TOKEN` environment secret with publish access to the `@sugarforever` scope (needed for the first publish unless npm already allows a trusted publisher), or
-- configure npm Trusted Publishing for repository `sugarforever/dsh-plugins` and workflow `publish-dsh-zvec-grep.yml`.
-
-Push a tag matching the package version, for example `dsh-zvec-grep-v0.1.0`, or run the workflow manually. The workflow verifies, builds, inspects, and publishes the package with npm provenance. Existing versions are left unchanged.
-
 ## License
 
 MIT. [zvec-grep](https://github.com/zvec-ai/zvec-grep) and [zvec](https://github.com/alibaba/zvec) are separate Apache-2.0 projects distributed by their respective maintainers.
