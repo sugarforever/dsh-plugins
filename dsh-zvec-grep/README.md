@@ -28,16 +28,9 @@ npm install -g @zvec/zvec-grep
 
 The default `engineModule` is the bare specifier `@zvec/zvec-grep`, and resolution also covers the global npm root, so an engine installed that way is picked up without further configuration. Until then, `zvec_search` returns `status: error` with the exact command above and the status pill shows `Error`; a missing engine is re-probed at most once every 30 seconds, so installing it while Harness is running recovers on the next search without a restart.
 
-To keep the engine out of the profile tree, add the npm/pnpm escape hatch to the profile `.npmrc`:
+To keep the engine out of the profile tree, npm reads `omit=optional` from the profile `.npmrc` (or the `--omit=optional` flag). **pnpm has no equivalent escape hatch.** Since pnpm 10, `.npmrc` carries only registry and auth settings; every other setting belongs in `pnpm-workspace.yaml`, and no setting there removes an optional dependency of a direct dependency: `supportedArchitectures` does not filter foreign-platform tarballs (the lockfile is platform-independent by design), and `ignoredOptionalDependencies` applies only to packages that appear as someone else's optional dependency. A Harness-managed profile install therefore fetches the whole engine chain, including the roughly 650 MB of cross-platform and GPU variants that pnpm resolves for every operating system. Declaring the engine as an optional **peer** dependency instead of an optional dependency is the way to drop it from the install plan entirely; see [issue #1](https://github.com/sugarforever/dsh-plugins/issues/1).
 
-```ini
-optional=false      # pnpm
-omit=optional       # npm
-```
-
-pnpm still resolves the engine's package graph, so this removes the link and install steps rather than every registry request.
-
-pnpm 10 and newer refuse to run the engine chain's install scripts (`@zvec/zvec`, `onnxruntime-node`, `sharp`, `@vscode/ripgrep`) and reports `ERR_PNPM_IGNORED_BUILDS`. The Harness plugin command treats any non-zero pnpm exit as a failed install and then skips wiring the plugin into `dsh.profile.bundles`, which leaves the plugin installed but never loaded. Set the escape hatch above before adding the plugin, or approve those builds, so pnpm exits cleanly.
+pnpm 10 and newer refuse to run the engine chain's install scripts (`@zvec/zvec`, `onnxruntime-node`, `sharp`, `@vscode/ripgrep`) and reports `ERR_PNPM_IGNORED_BUILDS`. The Harness plugin command treats any non-zero pnpm exit as a failed install and then skips wiring the plugin into `dsh.profile.bundles`, which leaves the plugin installed but never loaded. Approve those builds through pnpm's `allowBuilds` setting in `pnpm-workspace.yaml` so the install exits cleanly.
 
 Do not run `zg --server` for a workspace while the plugin is active: both would own the same `.zvec-grep/` index.
 
