@@ -5,6 +5,7 @@ import { type SearchToolConfig } from './tool.ts';
 export declare const name = "dsh-zvec-grep";
 export declare const inject: string[];
 export interface Config {
+    engineModule?: string;
     embedding?: string;
     device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda';
     defaultLimit?: number;

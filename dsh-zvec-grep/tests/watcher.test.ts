@@ -1,6 +1,6 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createWorkspaceWatcher, createWorkspaceWatcherWith, type NativeWatch } from '../src/watcher.ts'
@@ -34,7 +34,8 @@ describe('createWorkspaceWatcher', () => {
     listener!('change', null)
 
     expect(change).toHaveBeenCalledOnce()
-    expect(change).toHaveBeenCalledWith(join('/repo', 'src/index.ts'))
+    // The watcher reports absolute paths, matching its own resolve(root, filename).
+    expect(change).toHaveBeenCalledWith(resolve('/repo', 'src/index.ts'))
     expect(error).not.toHaveBeenCalled()
     await watcher.close()
     expect(native.close).toHaveBeenCalledOnce()
