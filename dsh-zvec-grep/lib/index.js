@@ -12,6 +12,21 @@ const DEFAULT_ENGINE_MODULE = "@zvec/zvec-grep";
 /** Mirrors `optionalDependencies` in package.json; asserted by tests/package-metadata.test.ts. */
 const ENGINE_RANGE = "^0.2.1";
 const ENGINE_INSTALL_COMMAND = "npm install -g @zvec/zvec-grep";
+/**
+* Compares a resolved engine version against the range this plugin was tested with.
+*
+* This is the single place to touch when a new engine line appears: a pre-1.0 engine may break in
+* its minor digit, so `^0.2.1` admits `0.2.x` but not `0.3.x`, while from 1.0 on only the major
+* digit is breaking. The result is a *signal*, never a gate: an out-of-range engine is still
+* resolved and used, because refusing it would fail a workspace for a reason the user cannot act on.
+*/
+function withinTestedRange(version, range = ENGINE_RANGE) {
+	const expected = range.replace(/^[^\d]*/, "").split(".");
+	const actual = version.split(".");
+	if (actual[0] === void 0 || actual[0] !== expected[0]) return false;
+	if (expected[0] !== "0") return true;
+	return actual[1] === expected[1];
+}
 /** How long a failed resolution is reused before another probe is allowed. */
 const ENGINE_RETRY_INTERVAL_MS = 3e4;
 var EngineUnavailableError = class extends Error {
@@ -194,7 +209,10 @@ var EngineLoader = class {
 			const factory = engineFactory(await this.importModule(candidate.specifier));
 			if (factory === void 0) throw new Error("module does not export createZvecGrep");
 			this.checkVersion(candidate);
-			return { createZvecGrep: async (options) => await factory(options) };
+			return {
+				createZvecGrep: async (options) => await factory(options),
+				...candidate.version === void 0 ? {} : { version: candidate.version }
+			};
 		} catch (error) {
 			attempts.push(`${candidate.label} (${errorMessage$1(error)})`);
 			return;
@@ -235,8 +253,7 @@ var EngineLoader = class {
 	}
 	checkVersion(candidate) {
 		if (candidate.version === void 0 || this.onWarning === void 0) return;
-		const expected = ENGINE_RANGE.replace(/^[^\d]*/, "").split(".")[0];
-		if (expected === void 0 || expected === "" || candidate.version.split(".")[0] === expected) return;
+		if (withinTestedRange(candidate.version)) return;
 		this.onWarning(`dsh-zvec-grep: resolved @zvec/zvec-grep ${candidate.version} from ${candidate.label}, which is outside the tested range ${ENGINE_RANGE}`);
 	}
 };
@@ -309,31 +326,47 @@ var WorkspaceSearchRuntime = class {
 			this.activate(root).catch(() => void 0);
 			state = this.workspaces.get(root);
 		}
+		const identity = this.engineIdentity();
 		if (state.phase === "error" && state.engineFailed) await this.reactivate(state);
 		if (state.phase === "indexing") return {
 			status: "indexing",
 			root,
-			message: statusMessages.indexing
+			message: statusMessages.indexing,
+			...identity
 		};
 		if (state.phase === "refreshing") return {
 			status: "refreshing",
 			root,
-			message: statusMessages.refreshing
+			message: statusMessages.refreshing,
+			...identity
 		};
 		if (state.phase === "error") return {
 			status: "error",
 			root,
-			message: errorMessage(state.error)
+			message: errorMessage(state.error),
+			...identity
 		};
-		return {
-			status: "ready",
-			result: await (await state.engine).context({
-				...options,
+		const engine = await state.engine;
+		try {
+			return {
+				status: "ready",
+				result: await engine.context({
+					...options,
+					root,
+					autoUpdate: false
+				}),
+				...state.indexInfo === void 0 ? {} : { info: state.indexInfo },
+				...identity
+			};
+		} catch (error) {
+			if (state.controller.signal.aborted) throw error;
+			return {
+				status: "error",
 				root,
-				autoUpdate: false
-			}),
-			...state.indexInfo === void 0 ? {} : { info: state.indexInfo }
-		};
+				message: errorMessage(error),
+				...identity
+			};
+		}
 	}
 	/**
 	* Re-attempts engine resolution for a workspace whose engine never loaded. The engine loader
@@ -400,6 +433,16 @@ var WorkspaceSearchRuntime = class {
 		this.setPhase(state, "error");
 		state.error = error;
 		state.engineFailed = await state.engine.then(() => false, () => true);
+	}
+	/** Engine identity for an outcome: the resolved version and the range this plugin was tested on. */
+	engineIdentity() {
+		const version = this.options.engineVersion?.();
+		const range = this.options.engineRange;
+		if (version === void 0 && range === void 0) return {};
+		return { engine: {
+			...version === void 0 ? {} : { version },
+			...range === void 0 ? {} : { range }
+		} };
 	}
 	/** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
 	async readIndexInfo(engine) {
@@ -507,8 +550,15 @@ function projectIndexCounts(info) {
 		...status.filesFailed === void 0 ? {} : { failed: status.filesFailed }
 	};
 }
-function projectResult(result, info) {
+/** An out-of-range engine keeps working, but an upgrade should be visible, not only logged. */
+function versionWarning(engine) {
+	if (engine?.version === void 0 || engine.range === void 0) return void 0;
+	if (withinTestedRange(engine.version, engine.range)) return void 0;
+	return `resolved @zvec/zvec-grep ${engine.version} is outside the range this plugin was tested against (${engine.range}); the plugin still uses it`;
+}
+function projectResult(result, info, engine) {
 	const indexed = projectIndexCounts(info);
+	const warning = versionWarning(engine) ?? (indexed?.files === 0 ? `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)` : void 0);
 	return {
 		status: "ready",
 		query: result.query,
@@ -517,7 +567,8 @@ function projectResult(result, info) {
 		coverage: result.coverage,
 		diagnostics: projectDiagnostics(result),
 		...indexed === void 0 ? {} : { indexed },
-		...indexed?.files === 0 ? { warning: `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)` } : {},
+		...engine === void 0 ? {} : { engine },
+		...warning === void 0 ? {} : { warning },
 		results: result.items.map((item) => ({
 			path: item.file.relativePath,
 			...lineRange(item),
@@ -530,12 +581,12 @@ function projectResult(result, info) {
 	};
 }
 function project(outcome) {
-	return outcome.status === "ready" ? projectResult(outcome.result, outcome.info) : outcome;
+	return outcome.status === "ready" ? projectResult(outcome.result, outcome.info, outcome.engine) : outcome;
 }
 function createSearchTool(runtime, config) {
 	return defineTool({
 		name: "zvec_search",
-		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, and indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root. Use exact grep for known literals or exhaustive matches.",
+		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root, and engine reports the resolved @zvec/zvec-grep version plus the range this plugin was tested against. Use exact grep for known literals or exhaustive matches.",
 		parameters: {
 			query: {
 				type: "string",
@@ -582,6 +633,14 @@ function createSearchTool(runtime, config) {
 							entities: { type: "integer" },
 							truncated: { type: "integer" },
 							failed: { type: "integer" }
+						}
+					},
+					engine: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							version: { type: "string" },
+							range: { type: "string" }
 						}
 					},
 					results: {
@@ -751,12 +810,19 @@ function apply(ctx, config) {
 		specifier: config.engineModule ?? DEFAULT_ENGINE_MODULE,
 		onWarning: (message) => ctx.logger.warn(message)
 	});
+	let engineVersion;
 	const runtime = new WorkspaceSearchRuntime({
-		create: async (root) => (await engines.load()).createZvecGrep({
-			root,
-			embedding,
-			device
-		}),
+		create: async (root) => {
+			const engineModule = await engines.load();
+			engineVersion = engineModule.version;
+			return engineModule.createZvecGrep({
+				root,
+				embedding,
+				device
+			});
+		},
+		engineVersion: () => engineVersion,
+		engineRange: ENGINE_RANGE,
 		watch: createWorkspaceWatcher,
 		debounceMs: config.watchDebounceMs ?? 750,
 		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5

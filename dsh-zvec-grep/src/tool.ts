@@ -1,4 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { withinTestedRange } from './engine.ts'
 import type { ZvecContextItem, ZvecContextResult, ZvecEngineInfo } from './engine.ts'
 import type { WorkspaceSearchOutcome, WorkspaceSearchRuntime } from './runtime.ts'
 
@@ -57,8 +58,26 @@ function projectIndexCounts(info: ZvecEngineInfo | undefined) {
   }
 }
 
-function projectResult(result: ZvecContextResult, info: ZvecEngineInfo | undefined) {
+/** An out-of-range engine keeps working, but an upgrade should be visible, not only logged. */
+function versionWarning(engine: { version?: string; range?: string } | undefined): string | undefined {
+  if (engine?.version === undefined || engine.range === undefined) return undefined
+  if (withinTestedRange(engine.version, engine.range)) return undefined
+  return `resolved @zvec/zvec-grep ${engine.version} is outside the range this plugin was tested against (${engine.range}); the plugin still uses it`
+}
+
+function projectResult(
+  result: ZvecContextResult,
+  info: ZvecEngineInfo | undefined,
+  engine: { version?: string; range?: string } | undefined,
+) {
   const indexed = projectIndexCounts(info)
+  // A ready index holding nothing is almost always the wrong root: the session workspace is not the
+  // code root, and nested git repositories are excluded from every workspace index. Only one warning
+  // is reported, and a version mismatch wins because the reader can act on it.
+  const warning = versionWarning(engine)
+    ?? (indexed?.files === 0
+      ? `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)`
+      : undefined)
   return {
     status: 'ready' as const,
     query: result.query,
@@ -67,11 +86,8 @@ function projectResult(result: ZvecContextResult, info: ZvecEngineInfo | undefin
     coverage: result.coverage,
     diagnostics: projectDiagnostics(result),
     ...(indexed === undefined ? {} : { indexed }),
-    // A ready index holding nothing is almost always the wrong root: the session workspace is not
-    // the code root, and nested git repositories are excluded from every workspace index.
-    ...(indexed?.files === 0
-      ? { warning: `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)` }
-      : {}),
+    ...(engine === undefined ? {} : { engine }),
+    ...(warning === undefined ? {} : { warning }),
     results: result.items.map(item => ({
       path: item.file.relativePath,
       ...lineRange(item),
@@ -85,13 +101,15 @@ function projectResult(result: ZvecContextResult, info: ZvecEngineInfo | undefin
 }
 
 function project(outcome: WorkspaceSearchOutcome) {
-  return outcome.status === 'ready' ? projectResult(outcome.result, outcome.info) : outcome
+  return outcome.status === 'ready'
+    ? projectResult(outcome.result, outcome.info, outcome.engine)
+    : outcome
 }
 
 export function createSearchTool(runtime: WorkspaceSearchRuntime, config: SearchToolConfig) {
   return defineTool({
     name: 'zvec_search',
-    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, and indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root. Use exact grep for known literals or exhaustive matches.',
+    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root, and engine reports the resolved @zvec/zvec-grep version plus the range this plugin was tested against. Use exact grep for known literals or exhaustive matches.',
     parameters: {
       query: { type: 'string', required: true, description: 'Natural-language search intent.' },
       limit: { type: 'integer', description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.` },
@@ -125,6 +143,14 @@ export function createSearchTool(runtime: WorkspaceSearchRuntime, config: Search
               entities: { type: 'integer' },
               truncated: { type: 'integer' },
               failed: { type: 'integer' },
+            },
+          },
+          engine: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              version: { type: 'string' },
+              range: { type: 'string' },
             },
           },
           results: {

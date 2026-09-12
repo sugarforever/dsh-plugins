@@ -12,19 +12,28 @@ export type WorkspaceSearchOutcome = {
     status: 'indexing';
     root: string;
     message: string;
+    engine?: WorkspaceEngineIdentity;
 } | {
     status: 'refreshing';
     root: string;
     message: string;
+    engine?: WorkspaceEngineIdentity;
 } | {
     status: 'error';
     root: string;
     message: string;
+    engine?: WorkspaceEngineIdentity;
 } | {
     status: 'ready';
     result: ZvecContextResult;
     info?: ZvecEngineInfo;
+    engine?: WorkspaceEngineIdentity;
 };
+/** Engine identity attached to every outcome, so a version mismatch is visible where it hurts. */
+export interface WorkspaceEngineIdentity {
+    version?: string;
+    range?: string;
+}
 export interface WorkspaceIndexStatus {
     root: string;
     status: Phase;
@@ -37,6 +46,10 @@ export interface WorkspaceSearchRuntimeOptions {
     watch?: (root: string, callbacks: WorkspaceWatchCallbacks) => WorkspaceWatcher;
     debounceMs?: number;
     reconcileIntervalMs?: number;
+    /** Version of the engine the loader resolved, once it has one; reported back as diagnostics. */
+    engineVersion?: () => string | undefined;
+    /** The engine range this plugin was tested against; reported back as diagnostics. */
+    engineRange?: string;
 }
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error';
 export declare class WorkspaceSearchRuntime {
@@ -58,6 +71,8 @@ export declare class WorkspaceSearchRuntime {
     private startWatcher;
     private indexInitially;
     private failWorkspace;
+    /** Engine identity for an outcome: the resolved version and the range this plugin was tested on. */
+    private engineIdentity;
     /** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
     private readIndexInfo;
     private queuePath;

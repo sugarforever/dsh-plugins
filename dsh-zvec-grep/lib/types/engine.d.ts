@@ -100,12 +100,23 @@ export interface SearchEngine {
 /** The engine package surface this plugin resolves, without depending on the package itself. */
 export interface ZvecGrepModule {
     createZvecGrep(options: ZvecEngineOptions): Promise<SearchEngine>;
+    /** Version read from the resolved package manifest, when it declares one. */
+    version?: string;
 }
 /** Default `engineModule` value: install the engine as an ordinary dependency. */
 export declare const DEFAULT_ENGINE_MODULE = "@zvec/zvec-grep";
 /** Mirrors `optionalDependencies` in package.json; asserted by tests/package-metadata.test.ts. */
 export declare const ENGINE_RANGE = "^0.2.1";
 export declare const ENGINE_INSTALL_COMMAND = "npm install -g @zvec/zvec-grep";
+/**
+ * Compares a resolved engine version against the range this plugin was tested with.
+ *
+ * This is the single place to touch when a new engine line appears: a pre-1.0 engine may break in
+ * its minor digit, so `^0.2.1` admits `0.2.x` but not `0.3.x`, while from 1.0 on only the major
+ * digit is breaking. The result is a *signal*, never a gate: an out-of-range engine is still
+ * resolved and used, because refusing it would fail a workspace for a reason the user cannot act on.
+ */
+export declare function withinTestedRange(version: string, range?: string): boolean;
 /** How long a failed resolution is reused before another probe is allowed. */
 export declare const ENGINE_RETRY_INTERVAL_MS = 30000;
 export declare class EngineUnavailableError extends Error {

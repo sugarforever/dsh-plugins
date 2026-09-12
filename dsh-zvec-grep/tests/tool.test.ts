@@ -111,6 +111,34 @@ describe('zvec_search tool', () => {
     expect(value.diagnostics).toEqual({})
   })
 
+  it('reports the engine version and warns only when it leaves the tested range', async () => {
+    const run = async (version: string) => {
+      const search = vi.fn(async () => ({
+        status: 'ready' as const,
+        result: {
+          query: 'anything',
+          root: '/repo',
+          source: 'index' as const,
+          coverage: 'ranked_sample' as const,
+          items: [],
+        },
+        engine: { version, range: '^0.2.1' },
+      }))
+      const tool = createSearchTool({ search } as never, { defaultLimit: 10, maxLimit: 30 })
+      return tool.execute(
+        { query: 'anything' },
+        { agent: { session: { header: { cwd: '/repo' } } }, signal: new AbortController().signal } as never,
+      ) as Promise<{ engine?: unknown; warning?: string }>
+    }
+
+    const inside = await run('0.2.9')
+    expect(inside.engine).toEqual({ version: '0.2.9', range: '^0.2.1' })
+    expect(inside.warning).toBeUndefined()
+
+    const outside = await run('0.3.0')
+    expect(outside.warning).toContain('outside the range')
+  })
+
   it('returns a programmatic indexing status unchanged', async () => {
     const search = vi.fn(async () => ({
       status: 'indexing' as const,

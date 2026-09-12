@@ -41,6 +41,21 @@ pnpm 10 and newer refuse to run the engine chain's install scripts (`@zvec/zvec`
 
 Do not run `zg --server` for a workspace while the plugin is active: both would own the same `.zvec-grep/` index.
 
+### Engine upgrades
+
+The plugin declares the engine range it was tested against in one place: `ENGINE_RANGE` in `src/engine.ts`, mirrored by the `optionalDependencies` entry in `package.json` and kept in sync by a test. `zvec_search` reports the resolved version and that range as `engine: { version, range }`.
+
+The range is a **signal, not a gate**. An engine outside it is still resolved and used, because refusing it would fail a workspace for a reason you cannot act on. A pre-1.0 engine may break in its minor digit, so `^0.2.1` admits `0.2.x` but not `0.3.x`; from `1.0.0` on, only the major digit counts as breaking. When the resolved engine leaves the range, the plugin logs a warning and adds a `warning` to the search result.
+
+Before widening the range, run the suite against the new engine:
+
+```bash
+npm install --ignore-scripts @zvec/zvec-grep@<version>
+npm test
+```
+
+Expect an index rebuild after a minor or major upgrade, because the engine owns its on-disk index format. Delete `<workspace>/.zvec-grep/` and search again: the plugin rebuilds in the background. A search that fails anyway — a concurrent `zg` process holding the index write lock, or an index the new engine cannot read — comes back as `status: error` carrying the engine's own message, and the next search retries by itself.
+
 ## How it works
 
 When Harness creates or resumes a session, the plugin reads the workspace from the immutable `session.header.cwd`, starts a file watcher, and builds the initial index in the background. Search never waits for indexing and never triggers an update. If the index is busy or unavailable, `zvec_search` returns a structured `indexing`, `refreshing`, or `error` status so the Agent or user can decide whether to retry later or use exact grep.

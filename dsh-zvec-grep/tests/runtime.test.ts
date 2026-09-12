@@ -84,6 +84,42 @@ describe('WorkspaceSearchRuntime', () => {
     expect('info' in outcome).toBe(false)
   })
 
+  it('reports a search failure as a structured error without poisoning the workspace', async () => {
+    const backend = engine()
+    backend.context = vi.fn(async () => {
+      throw new Error('zvec file metadata storage does not exist')
+    })
+    const fixture = harness(backend)
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    await expect(fixture.runtime.search(WORKSPACE, { query: 'anything' })).resolves.toEqual(expect.objectContaining({
+      status: 'error',
+      root: WORKSPACE,
+      message: 'zvec file metadata storage does not exist',
+    }))
+    // A transient failure (a concurrent index run holding the write lock) must not stick.
+    expect(fixture.runtime.statusFor(WORKSPACE)?.status).toBe('ready')
+  })
+
+  it('reports the resolved engine version and tested range with an outcome', async () => {
+    const runtime = new WorkspaceSearchRuntime({
+      create: async () => engine(),
+      watch: vi.fn(() => ({ close: vi.fn() })),
+      debounceMs: 25,
+      reconcileIntervalMs: 0,
+      engineVersion: () => '0.2.9',
+      engineRange: '^0.2.1',
+    })
+    runtime.activate(WORKSPACE)
+    await runtime.settled(WORKSPACE)
+
+    await expect(runtime.search(WORKSPACE, { query: 'anything' })).resolves.toEqual(expect.objectContaining({
+      engine: { version: '0.2.9', range: '^0.2.1' },
+    }))
+    await runtime.close()
+  })
+
   it('publishes workspace status snapshots across indexing and watcher refreshes', async () => {
     vi.useFakeTimers()
     const fixture = harness()
