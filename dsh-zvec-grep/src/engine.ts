@@ -16,6 +16,18 @@ export type ZvecItemRange =
   | { kind: 'page' | 'page_text'; page: number }
   | { kind: 'file' | 'byte' | 'page_region' }
 
+/** Entity annotation the engine attaches to each indexed fragment (observed on 0.2.2 payloads). */
+export interface ZvecEntityMetadata {
+  kind?: string
+  symbolType?: string
+  symbolName?: string
+  signature?: string
+  modifiers?: readonly string[]
+  heading?: string
+  level?: number
+  scope?: string | null
+}
+
 export interface ZvecContextItem {
   file: { relativePath: string }
   range: ZvecItemRange
@@ -24,6 +36,18 @@ export interface ZvecContextItem {
   status: 'fresh' | 'possibly_stale'
   matchedBy: string | readonly string[]
   score?: number
+  kind?: string
+  rank?: number
+  metadata?: ZvecEntityMetadata
+}
+
+/** How the engine ranked what it returned, and how long each phase took. */
+export interface ZvecContextDiagnostics {
+  index?: {
+    hitsReturned?: number
+    routes?: readonly { mode?: string }[]
+  }
+  timings?: readonly { name?: string; durationMs?: number }[]
 }
 
 export interface ZvecContextResult {
@@ -32,6 +56,22 @@ export interface ZvecContextResult {
   source: 'index' | 'rg'
   coverage: 'ranked_sample' | 'rg_exhaustive' | 'rg_truncated'
   items: ZvecContextItem[]
+  diagnostics?: ZvecContextDiagnostics
+}
+
+/** What the workspace index currently covers, as reported by the engine's `info()`. */
+export interface ZvecIndexCounts {
+  filesScanned?: number
+  filesIndexed?: number
+  entitiesIndexed?: number
+  fragmentsTruncated?: number
+  filesPending?: number
+  filesFailed?: number
+}
+
+export interface ZvecEngineInfo {
+  indexed?: boolean
+  status?: ZvecIndexCounts
 }
 
 export interface ZvecIndexOptions {
@@ -56,6 +96,7 @@ export interface ZvecEngineOptions {
 export interface SearchEngine {
   index(options?: ZvecIndexOptions): Promise<unknown>
   context(options: ZvecContextOptions): Promise<ZvecContextResult>
+  info?(): Promise<ZvecEngineInfo>
   close(): Promise<void>
 }
 

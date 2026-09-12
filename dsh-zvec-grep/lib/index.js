@@ -331,7 +331,8 @@ var WorkspaceSearchRuntime = class {
 				...options,
 				root,
 				autoUpdate: false
-			})
+			}),
+			...state.indexInfo === void 0 ? {} : { info: state.indexInfo }
 		};
 	}
 	/**
@@ -380,10 +381,12 @@ var WorkspaceSearchRuntime = class {
 		try {
 			await state.watcher?.ready;
 			state.controller.signal.throwIfAborted();
-			await (await state.engine).index({
+			const engine = await state.engine;
+			await engine.index({
 				root: state.root,
 				signal: state.controller.signal
 			});
+			state.indexInfo = await this.readIndexInfo(engine);
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
 			state.engineFailed = false;
@@ -397,6 +400,14 @@ var WorkspaceSearchRuntime = class {
 		this.setPhase(state, "error");
 		state.error = error;
 		state.engineFailed = await state.engine.then(() => false, () => true);
+	}
+	/** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
+	async readIndexInfo(engine) {
+		try {
+			return await engine.info?.();
+		} catch {
+			return;
+		}
 	}
 	queuePath(state, path) {
 		if (state.controller.signal.aborted || state.engineFailed) return;
@@ -428,11 +439,13 @@ var WorkspaceSearchRuntime = class {
 		state.fullReconcile = false;
 		state.changedPaths.clear();
 		try {
-			await (await state.engine).index({
+			const engine = await state.engine;
+			await engine.index({
 				root: state.root,
 				signal: state.controller.signal,
 				...fullReconcile ? {} : { changedPaths }
 			});
+			state.indexInfo = await this.readIndexInfo(engine);
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
 		} catch (error) {
@@ -460,16 +473,55 @@ function lineRange(item) {
 	};
 	return {};
 }
-function projectResult(result) {
+/** What the engine says this fragment is: a code symbol or a markdown heading. */
+function describeItem(item) {
+	const metadata = item.metadata;
+	if (metadata === void 0) return {};
+	const symbol = metadata.symbolType !== void 0 && metadata.symbolName !== void 0 ? `${metadata.symbolType} ${metadata.symbolName}` : void 0;
+	const scope = typeof metadata.scope === "string" && metadata.scope.length > 0 ? metadata.scope : void 0;
+	return {
+		...symbol === void 0 ? {} : { symbol },
+		...metadata.heading === void 0 ? {} : { heading: metadata.heading },
+		...scope === void 0 ? {} : { scope }
+	};
+}
+/** Which routes ran and how long the search took, so a thin answer can explain itself. */
+function projectDiagnostics(result) {
+	const hits = result.diagnostics?.index?.hitsReturned;
+	const routes = result.diagnostics?.index?.routes?.map((route) => route.mode).filter((mode) => typeof mode === "string");
+	const totalMs = result.diagnostics?.timings?.find((entry) => entry.name === "total")?.durationMs;
+	return {
+		...hits === void 0 ? {} : { hits },
+		...routes === void 0 || routes.length === 0 ? {} : { routes: routes.join(",") },
+		...totalMs === void 0 ? {} : { totalMs }
+	};
+}
+/** How much the workspace index actually covers right now. */
+function projectIndexCounts(info) {
+	const status = info?.status;
+	if (status === void 0) return void 0;
+	return {
+		...status.filesIndexed === void 0 ? {} : { files: status.filesIndexed },
+		...status.entitiesIndexed === void 0 ? {} : { entities: status.entitiesIndexed },
+		...status.fragmentsTruncated === void 0 ? {} : { truncated: status.fragmentsTruncated },
+		...status.filesFailed === void 0 ? {} : { failed: status.filesFailed }
+	};
+}
+function projectResult(result, info) {
+	const indexed = projectIndexCounts(info);
 	return {
 		status: "ready",
 		query: result.query,
 		root: result.root,
 		source: result.source,
 		coverage: result.coverage,
+		diagnostics: projectDiagnostics(result),
+		...indexed === void 0 ? {} : { indexed },
+		...indexed?.files === 0 ? { warning: `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)` } : {},
 		results: result.items.map((item) => ({
 			path: item.file.relativePath,
 			...lineRange(item),
+			...describeItem(item),
 			content: item.content,
 			status: item.status,
 			matchedBy: Array.isArray(item.matchedBy) ? item.matchedBy.join(",") : String(item.matchedBy),
@@ -478,12 +530,12 @@ function projectResult(result) {
 	};
 }
 function project(outcome) {
-	return outcome.status === "ready" ? projectResult(outcome.result) : outcome;
+	return outcome.status === "ready" ? projectResult(outcome.result, outcome.info) : outcome;
 }
 function createSearchTool(runtime, config) {
 	return defineTool({
 		name: "zvec_search",
-		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Use exact grep for known literals or exhaustive matches.",
+		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, and indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root. Use exact grep for known literals or exhaustive matches.",
 		parameters: {
 			query: {
 				type: "string",
@@ -509,9 +561,29 @@ function createSearchTool(runtime, config) {
 						required: true
 					},
 					message: { type: "string" },
+					warning: { type: "string" },
 					query: { type: "string" },
 					source: { type: "string" },
 					coverage: { type: "string" },
+					diagnostics: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							hits: { type: "integer" },
+							routes: { type: "string" },
+							totalMs: { type: "number" }
+						}
+					},
+					indexed: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							files: { type: "integer" },
+							entities: { type: "integer" },
+							truncated: { type: "integer" },
+							failed: { type: "integer" }
+						}
+					},
 					results: {
 						type: "array",
 						items: {
@@ -524,6 +596,9 @@ function createSearchTool(runtime, config) {
 								},
 								startLine: { type: "integer" },
 								endLine: { type: "integer" },
+								symbol: { type: "string" },
+								heading: { type: "string" },
+								scope: { type: "string" },
 								content: {
 									type: "string",
 									required: true

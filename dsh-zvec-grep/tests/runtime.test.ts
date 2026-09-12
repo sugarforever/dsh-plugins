@@ -49,6 +49,41 @@ describe('WorkspaceSearchRuntime', () => {
     expect(fixture.backend.index).toHaveBeenCalledWith(expect.objectContaining({ root: WORKSPACE }))
   })
 
+  it('reports the index counts captured when the workspace indexed', async () => {
+    const backend = engine()
+    backend.info = vi.fn(async () => ({
+      indexed: true,
+      status: { filesIndexed: 56, entitiesIndexed: 390, fragmentsTruncated: 0, filesFailed: 0 },
+    }))
+    const fixture = harness(backend)
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    const first = await fixture.runtime.search(WORKSPACE, { query: 'one' })
+    const second = await fixture.runtime.search(WORKSPACE, { query: 'two' })
+
+    expect(first).toEqual(expect.objectContaining({
+      status: 'ready',
+      info: expect.objectContaining({ status: expect.objectContaining({ filesIndexed: 56 }) }),
+    }))
+    expect(second).toEqual(expect.objectContaining({ status: 'ready' }))
+    // The counts only move when the index does, so a search must not re-read them.
+    expect(backend.info).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores an engine that cannot report its index counts', async () => {
+    const backend = engine()
+    backend.info = vi.fn(async () => { throw new Error('lock busy') })
+    const fixture = harness(backend)
+    fixture.runtime.activate(WORKSPACE)
+    await fixture.runtime.settled(WORKSPACE)
+
+    const outcome = await fixture.runtime.search(WORKSPACE, { query: 'anything' })
+
+    expect(outcome).toEqual(expect.objectContaining({ status: 'ready' }))
+    expect('info' in outcome).toBe(false)
+  })
+
   it('publishes workspace status snapshots across indexing and watcher refreshes', async () => {
     vi.useFakeTimers()
     const fixture = harness()

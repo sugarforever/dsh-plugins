@@ -53,7 +53,11 @@ The first workspace may download the default local embedding model. Indexes are 
 
 ## Tool for agents
 
-`zvec_search` searches the calling session's workspace. A successful call returns `status: ready` plus bounded source excerpts with relative paths, line ranges, freshness, match routes, and scores. Non-ready calls return immediately without partial or silently stale results.
+`zvec_search` searches the calling session's workspace. A successful call returns `status: ready` plus bounded source excerpts with relative paths, line ranges, freshness, match routes, and scores. Each excerpt also names the entity the engine recognised in it: `symbol` (for example `function authenticate`) for code, and `heading` plus `scope` for markdown.
+
+The response is self-describing. `diagnostics` reports which routes ran (`fts`, `vector`), how many hits came back, and the total milliseconds; `indexed` reports how many files and entities the workspace index actually holds, plus truncated fragments and failed files. Treat `indexed.files` as a sanity check: a very small count means the session workspace is not the code root, because zvec-grep excludes nested git repositories from every index. A ready index that holds no files at all adds an explicit `warning`.
+
+Non-ready calls return immediately without partial or silently stale results.
 
 Use it when wording or location is unknown, or when the question requires architecture, relationships, control flow, design rationale, or synthesis across files. Use Harness' exact grep for known identifiers, literals, regular expressions, configuration keys, error messages, and exhaustive occurrence lists.
 

@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexOptions } from './engine.ts'
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecEngineInfo, ZvecIndexOptions } from './engine.ts'
 
 export type { SearchEngine } from './engine.ts'
 
@@ -18,7 +18,7 @@ export type WorkspaceSearchOutcome =
   | { status: 'indexing'; root: string; message: string }
   | { status: 'refreshing'; root: string; message: string }
   | { status: 'error'; root: string; message: string }
-  | { status: 'ready'; result: ZvecContextResult }
+  | { status: 'ready'; result: ZvecContextResult; info?: ZvecEngineInfo }
 
 export interface WorkspaceIndexStatus {
   root: string
@@ -52,6 +52,8 @@ interface WorkspaceState {
   changedPaths: Set<string>
   fullReconcile: boolean
   engineFailed: boolean
+  /** Coverage counts captured after the last index run; they only move when the index does. */
+  indexInfo?: ZvecEngineInfo
 }
 
 const statusMessages = {
@@ -135,7 +137,7 @@ export class WorkspaceSearchRuntime {
 
     const engine = await state.engine
     const result = await engine.context({ ...options, root, autoUpdate: false })
-    return { status: 'ready', result }
+    return { status: 'ready', result, ...(state.indexInfo === undefined ? {} : { info: state.indexInfo }) }
   }
 
   /**
@@ -191,6 +193,7 @@ export class WorkspaceSearchRuntime {
       state.controller.signal.throwIfAborted()
       const engine = await state.engine
       await engine.index({ root: state.root, signal: state.controller.signal })
+      state.indexInfo = await this.readIndexInfo(engine)
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
       state.engineFailed = false
@@ -206,6 +209,15 @@ export class WorkspaceSearchRuntime {
     state.error = error
     // A rejected engine promise never succeeds again, so stop scheduling work that must use it.
     state.engineFailed = await state.engine.then(() => false, () => true)
+  }
+
+  /** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
+  private async readIndexInfo(engine: SearchEngine): Promise<ZvecEngineInfo | undefined> {
+    try {
+      return await engine.info?.()
+    } catch {
+      return undefined
+    }
   }
 
   private queuePath(state: WorkspaceState, path: string): void {
@@ -247,6 +259,7 @@ export class WorkspaceSearchRuntime {
         signal: state.controller.signal,
         ...(fullReconcile ? {} : { changedPaths }),
       })
+      state.indexInfo = await this.readIndexInfo(engine)
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
     } catch (error) {

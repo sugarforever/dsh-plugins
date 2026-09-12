@@ -1,4 +1,4 @@
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts';
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecEngineInfo } from './engine.ts';
 export type { SearchEngine } from './engine.ts';
 export interface WorkspaceWatcher {
     ready?: Promise<void>;
@@ -23,6 +23,7 @@ export type WorkspaceSearchOutcome = {
 } | {
     status: 'ready';
     result: ZvecContextResult;
+    info?: ZvecEngineInfo;
 };
 export interface WorkspaceIndexStatus {
     root: string;
@@ -57,6 +58,8 @@ export declare class WorkspaceSearchRuntime {
     private startWatcher;
     private indexInitially;
     private failWorkspace;
+    /** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
+    private readIndexInfo;
     private queuePath;
     private queueReconcile;
     private scheduleRefresh;
