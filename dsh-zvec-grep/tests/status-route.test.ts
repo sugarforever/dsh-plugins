@@ -3,7 +3,7 @@ import { registerStatusRoute } from '../src/status-route.ts'
 
 describe('status route', () => {
   it('reports every known workspace on a parameterless GET', async () => {
-    let route!: { path: string; methods?: string[]; fetch: (request: Request) => Promise<Response> }
+    let route!: { path: string; methods?: string[]; requestBody?: string; fetch: (request: Request) => Promise<Response> }
     const register = vi.fn((next: typeof route) => { route = next; return vi.fn() })
     const runtime = {
       statusFor: vi.fn((root: string) => root === '/repo'
@@ -20,6 +20,10 @@ describe('status route', () => {
 
     expect(route.path).toBe('/api/dsh-zvec-grep/status')
     expect(route.methods).toEqual(['GET'])
+    // The host bridges every /api request into a WHATWG Request; only 'buffered' leaves a
+    // body-less GET alone. Omitting the field takes the streaming branch and turns every poll
+    // into `Request with GET/HEAD method cannot have body` -> a bare 400.
+    expect(route.requestBody).toBe('buffered')
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(await response.json()).toEqual({
       version: 2,
