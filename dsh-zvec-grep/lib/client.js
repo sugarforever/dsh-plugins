@@ -41,14 +41,10 @@ const colors = {
 	ready: "var(--dsw-alias-state-success-primary)",
 	error: "var(--dsw-alias-state-error-primary)"
 };
-function currentWorkspace(props) {
+function currentRoot(props) {
 	return props.useSessions((state) => {
 		const current = state.current;
-		const root = current === void 0 ? void 0 : state.byId[current]?.cwd;
-		return current === void 0 || root === void 0 ? void 0 : {
-			sessionId: current,
-			root
-		};
+		return current === void 0 ? void 0 : state.byId[current]?.cwd;
 	});
 }
 function displayStatus(feed) {
@@ -62,15 +58,16 @@ function displayStatus(feed) {
 }
 function IndexStatusPill(props) {
 	const [expanded, setExpanded] = (0, react.useState)(false);
-	const workspace = currentWorkspace(props);
+	const root = currentRoot(props);
 	const feed = props.useIndexStatus((value) => value);
 	(0, react.useEffect)(() => {
-		props.statusSource.selectSession(workspace?.sessionId);
-	}, [props.statusSource, workspace?.sessionId]);
-	if (workspace === void 0) return null;
+		props.statusSource.selectWorkspace(root);
+	}, [props.statusSource, root]);
+	if (root === void 0) return null;
 	const status = displayStatus(feed);
 	const phase = status?.status ?? "indexing";
 	const label = status === void 0 && feed.connection === "loading" ? "Loading" : labels[phase];
+	const reason = feed.connection === "error" ? feed.message : void 0;
 	return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 		style: styles.anchor,
 		"data-zvec-index-status": phase,
@@ -84,20 +81,24 @@ function IndexStatusPill(props) {
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: styles.path,
-					children: workspace.root
+					children: root
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["Status: ", label] }),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", { children: ["Pending changes: ", status?.pendingChanges ?? 0] }),
 				status?.errorCode && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: styles.error,
-					children: "Index update failed"
+					children: feed.connection === "error" ? "Status unavailable" : "Index update failed"
+				}),
+				reason !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					style: styles.error,
+					children: reason
 				})
 			]
 		}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 			type: "button",
 			"aria-expanded": expanded,
 			"aria-label": `Zvec index ${label}`,
-			title: `Zvec index: ${label}`,
+			title: reason === void 0 ? `Zvec index: ${label}` : `Zvec index: ${label} — ${reason}`,
 			style: styles.button,
 			onClick: () => setExpanded((value) => !value),
 			children: [
@@ -177,17 +178,19 @@ const styles = {
 //#region src/client/status-source.ts
 const STATUS_PATH = "/api/dsh-zvec-grep/status";
 const ERROR_RETRY_MS = 5e3;
+const MISSING_WORKSPACE_RETRY_MS = 250;
 const INITIAL_SNAPSHOT = Object.freeze({ connection: "loading" });
 function parseWorkspace(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return void 0;
 	const item = value;
-	if (![
+	if (typeof item.root !== "string" || item.root.length === 0 || ![
 		"indexing",
 		"refreshing",
 		"ready",
 		"error"
 	].includes(String(item.status)) || typeof item.pendingChanges !== "number" || typeof item.updatedAt !== "number") return void 0;
 	return Object.freeze({
+		root: item.root,
 		status: item.status,
 		pendingChanges: item.pendingChanges,
 		updatedAt: item.updatedAt,
@@ -197,12 +200,12 @@ function parseWorkspace(value) {
 function parsePayload(value) {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid zvec status response");
 	const payload = value;
-	if (payload.version !== 1 || typeof payload.pollIntervalMs !== "number") throw new Error("Invalid zvec status response");
-	const status = parseWorkspace(payload.status);
-	if (status === void 0) throw new Error("Invalid zvec workspace status");
+	if (payload.version !== 2 || typeof payload.pollIntervalMs !== "number" || !Array.isArray(payload.workspaces)) throw new Error("Invalid zvec status response");
+	const workspaces = payload.workspaces.map(parseWorkspace);
+	if (workspaces.some((item) => item === void 0)) throw new Error("Invalid zvec workspace status");
 	return {
 		pollIntervalMs: payload.pollIntervalMs,
-		status
+		workspaces
 	};
 }
 var IndexStatusSource = class {
@@ -210,9 +213,9 @@ var IndexStatusSource = class {
 	listeners = /* @__PURE__ */ new Set();
 	timer;
 	running = false;
-	sessionId;
+	root;
 	generation = 0;
-	constructor(fetchStatus = (sessionId) => fetch(`${STATUS_PATH}?sessionId=${encodeURIComponent(sessionId)}`, { cache: "no-store" })) {
+	constructor(fetchStatus = () => fetch(STATUS_PATH, { cache: "no-store" })) {
 		this.fetchStatus = fetchStatus;
 	}
 	getSnapshot = () => this.snapshot;
@@ -222,15 +225,15 @@ var IndexStatusSource = class {
 			this.listeners.delete(listener);
 		};
 	};
-	selectSession(sessionId) {
-		if (this.sessionId === sessionId) return;
-		const hadSession = this.sessionId !== void 0;
-		this.sessionId = sessionId;
+	selectWorkspace(root) {
+		if (this.root === root) return;
+		const hadRoot = this.root !== void 0;
+		this.root = root;
 		this.generation += 1;
 		if (this.timer) clearTimeout(this.timer);
 		this.timer = void 0;
-		if (hadSession || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT);
-		if (this.running && sessionId !== void 0) this.poll();
+		if (hadRoot || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT);
+		if (this.running && root !== void 0) this.poll();
 	}
 	start() {
 		if (this.running) return;
@@ -244,22 +247,23 @@ var IndexStatusSource = class {
 		this.timer = void 0;
 	}
 	async poll() {
-		const sessionId = this.sessionId;
-		if (sessionId === void 0) return;
+		const root = this.root;
+		if (root === void 0) return;
 		const generation = this.generation;
 		let nextDelay = ERROR_RETRY_MS;
 		try {
-			const response = await this.fetchStatus(sessionId);
+			const response = await this.fetchStatus();
 			if (response.status === 404) {
-				nextDelay = 250;
+				nextDelay = MISSING_WORKSPACE_RETRY_MS;
 				if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT);
 			} else {
-				if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`);
+				if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for GET ${STATUS_PATH}`);
 				const payload = parsePayload(await response.json());
-				nextDelay = Math.max(250, payload.pollIntervalMs);
-				if (this.running && this.generation === generation) this.publish(Object.freeze({
+				const status = payload.workspaces.find((item) => item.root === root);
+				nextDelay = status === void 0 ? MISSING_WORKSPACE_RETRY_MS : Math.max(250, payload.pollIntervalMs);
+				if (this.running && this.generation === generation) this.publish(status === void 0 ? INITIAL_SNAPSHOT : Object.freeze({
 					connection: "ready",
-					status: payload.status
+					status
 				}));
 			}
 		} catch (error) {

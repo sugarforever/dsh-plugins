@@ -1,9 +1,5 @@
-import type { ZvecGrepContextOptions, ZvecGrepContextResult, ZvecGrepIndexOptions } from '@zvec/zvec-grep';
-export interface SearchEngine {
-    index(options?: ZvecGrepIndexOptions): Promise<unknown>;
-    context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>;
-    close(): Promise<void>;
-}
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult } from './engine.ts';
+export type { SearchEngine } from './engine.ts';
 export interface WorkspaceWatcher {
     ready?: Promise<void>;
     close(): void | Promise<void>;
@@ -26,7 +22,7 @@ export type WorkspaceSearchOutcome = {
     message: string;
 } | {
     status: 'ready';
-    result: ZvecGrepContextResult;
+    result: ZvecContextResult;
 };
 export interface WorkspaceIndexStatus {
     root: string;
@@ -50,15 +46,21 @@ export declare class WorkspaceSearchRuntime {
     settled(root: string): Promise<void>;
     status(): WorkspaceIndexStatus[];
     statusFor(root: string): WorkspaceIndexStatus | undefined;
-    search(root: string, options: ZvecGrepContextOptions): Promise<WorkspaceSearchOutcome>;
+    search(root: string, options: ZvecContextOptions): Promise<WorkspaceSearchOutcome>;
+    /**
+     * Re-attempts engine resolution for a workspace whose engine never loaded. The engine loader
+     * decides whether another probe is allowed yet, so repeated searches stay cheap. Indexing is
+     * restarted in the background; the caller still returns immediately.
+     */
+    private reactivate;
     close(): Promise<void>;
     private startWatcher;
     private indexInitially;
+    private failWorkspace;
     private queuePath;
     private queueReconcile;
     private scheduleRefresh;
     private refresh;
     private setPhase;
 }
-export {};
 //# sourceMappingURL=runtime.d.ts.map

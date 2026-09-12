@@ -6,7 +6,7 @@ import type { IndexStatusSnapshot, IndexStatusSource, WorkspaceIndexStatus } fro
 
 export type IndexStatusPillProps = PropsRuntime<'shell.overlay'> & {
   useIndexStatus: SnapshotSelectorHook<IndexStatusSnapshot>
-  statusSource: Pick<IndexStatusSource, 'selectSession'>
+  statusSource: Pick<IndexStatusSource, 'selectWorkspace'>
 }
 
 const labels = {
@@ -23,11 +23,10 @@ const colors = {
   error: 'var(--dsw-alias-state-error-primary)',
 } as const
 
-function currentWorkspace(props: IndexStatusPillProps): { sessionId: string; root: string } | undefined {
+function currentRoot(props: IndexStatusPillProps): string | undefined {
   return props.useSessions((state: { current?: string; byId: Record<string, { cwd?: string }> }) => {
     const current = state.current
-    const root = current === undefined ? undefined : state.byId[current]?.cwd
-    return current === undefined || root === undefined ? undefined : { sessionId: current, root }
+    return current === undefined ? undefined : state.byId[current]?.cwd
   })
 }
 
@@ -40,32 +39,36 @@ function displayStatus(feed: IndexStatusSnapshot): WorkspaceIndexStatus | { stat
 
 export function IndexStatusPill(props: IndexStatusPillProps) {
   const [expanded, setExpanded] = useState(false)
-  const workspace = currentWorkspace(props)
+  const root = currentRoot(props)
   const feed = props.useIndexStatus((value: IndexStatusSnapshot) => value)
   useEffect(() => {
-    props.statusSource.selectSession(workspace?.sessionId)
-  }, [props.statusSource, workspace?.sessionId])
-  if (workspace === undefined) return null
+    props.statusSource.selectWorkspace(root)
+  }, [props.statusSource, root])
+  if (root === undefined) return null
 
   const status = displayStatus(feed)
   const phase = status?.status ?? 'indexing'
   const label = status === undefined && feed.connection === 'loading' ? 'Loading' : labels[phase]
+  // The host deliberately never sends its own index-error text, so a failing poll is the only
+  // case that can name a reason: that message is the client's own transport failure.
+  const reason = feed.connection === 'error' ? feed.message : undefined
   return (
     <div style={styles.anchor} data-zvec-index-status={phase}>
       {expanded && (
         <div style={styles.panel} role="status">
           <strong style={styles.heading}>Zvec index</strong>
-          <span style={styles.path}>{workspace.root}</span>
+          <span style={styles.path}>{root}</span>
           <span>Status: {label}</span>
           <span>Pending changes: {status?.pendingChanges ?? 0}</span>
-          {status?.errorCode && <span style={styles.error}>Index update failed</span>}
+          {status?.errorCode && <span style={styles.error}>{feed.connection === 'error' ? 'Status unavailable' : 'Index update failed'}</span>}
+          {reason !== undefined && <span style={styles.error}>{reason}</span>}
         </div>
       )}
       <button
         type="button"
         aria-expanded={expanded}
         aria-label={`Zvec index ${label}`}
-        title={`Zvec index: ${label}`}
+        title={reason === undefined ? `Zvec index: ${label}` : `Zvec index: ${label} — ${reason}`}
         style={styles.button}
         onClick={() => setExpanded(value => !value)}
       >

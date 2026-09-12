@@ -1,5 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ZvecGrepContextItem, ZvecGrepContextResult } from '@zvec/zvec-grep'
+import type { ZvecContextItem, ZvecContextResult } from './engine.ts'
 import type { WorkspaceSearchOutcome, WorkspaceSearchRuntime } from './runtime.ts'
 
 export interface SearchToolConfig {
@@ -7,7 +7,7 @@ export interface SearchToolConfig {
   maxLimit: number
 }
 
-function lineRange(item: ZvecGrepContextItem): { startLine?: number; endLine?: number } {
+function lineRange(item: ZvecContextItem): { startLine?: number; endLine?: number } {
   const range = item.excerptRange ?? item.range
   if ('startLine' in range && 'endLine' in range) {
     return { startLine: range.startLine, endLine: range.endLine }
@@ -16,7 +16,7 @@ function lineRange(item: ZvecGrepContextItem): { startLine?: number; endLine?: n
   return {}
 }
 
-function projectResult(result: ZvecGrepContextResult) {
+function projectResult(result: ZvecContextResult) {
   return {
     status: 'ready' as const,
     query: result.query,
@@ -41,7 +41,7 @@ function project(outcome: WorkspaceSearchOutcome) {
 export function createSearchTool(runtime: WorkspaceSearchRuntime, config: SearchToolConfig) {
   return defineTool({
     name: 'zvec_search',
-    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready. Use exact grep for known literals or exhaustive matches.',
+    description: 'Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Use exact grep for known literals or exhaustive matches.',
     parameters: {
       query: { type: 'string', required: true, description: 'Natural-language search intent.' },
       limit: { type: 'integer', description: `Maximum results, from 1 to ${config.maxLimit}. Defaults to ${config.defaultLimit}.` },

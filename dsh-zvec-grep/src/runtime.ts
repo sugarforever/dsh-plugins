@@ -1,12 +1,8 @@
 import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { ZvecGrepContextOptions, ZvecGrepContextResult, ZvecGrepIndexOptions } from '@zvec/zvec-grep'
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexOptions } from './engine.ts'
 
-export interface SearchEngine {
-  index(options?: ZvecGrepIndexOptions): Promise<unknown>
-  context(options: ZvecGrepContextOptions): Promise<ZvecGrepContextResult>
-  close(): Promise<void>
-}
+export type { SearchEngine } from './engine.ts'
 
 export interface WorkspaceWatcher {
   ready?: Promise<void>
@@ -22,7 +18,7 @@ export type WorkspaceSearchOutcome =
   | { status: 'indexing'; root: string; message: string }
   | { status: 'refreshing'; root: string; message: string }
   | { status: 'error'; root: string; message: string }
-  | { status: 'ready'; result: ZvecGrepContextResult }
+  | { status: 'ready'; result: ZvecContextResult }
 
 export interface WorkspaceIndexStatus {
   root: string
@@ -55,6 +51,7 @@ interface WorkspaceState {
   refresh?: Promise<void>
   changedPaths: Set<string>
   fullReconcile: boolean
+  engineFailed: boolean
 }
 
 const statusMessages = {
@@ -94,6 +91,7 @@ export class WorkspaceSearchRuntime {
       updatedAt: Date.now(),
       changedPaths: new Set(),
       fullReconcile: false,
+      engineFailed: false,
     }
     this.workspaces.set(root, state)
     this.startWatcher(state)
@@ -123,13 +121,14 @@ export class WorkspaceSearchRuntime {
     return this.status().find(status => status.root === root)
   }
 
-  async search(root: string, options: ZvecGrepContextOptions): Promise<WorkspaceSearchOutcome> {
+  async search(root: string, options: ZvecContextOptions): Promise<WorkspaceSearchOutcome> {
     root = canonicalizeRoot(root)
     let state = this.workspaces.get(root)
     if (!state) {
       void this.activate(root).catch(() => undefined)
       state = this.workspaces.get(root)!
     }
+    if (state.phase === 'error' && state.engineFailed) await this.reactivate(state)
     if (state.phase === 'indexing') return { status: 'indexing', root, message: statusMessages.indexing }
     if (state.phase === 'refreshing') return { status: 'refreshing', root, message: statusMessages.refreshing }
     if (state.phase === 'error') return { status: 'error', root, message: errorMessage(state.error) }
@@ -137,6 +136,26 @@ export class WorkspaceSearchRuntime {
     const engine = await state.engine
     const result = await engine.context({ ...options, root, autoUpdate: false })
     return { status: 'ready', result }
+  }
+
+  /**
+   * Re-attempts engine resolution for a workspace whose engine never loaded. The engine loader
+   * decides whether another probe is allowed yet, so repeated searches stay cheap. Indexing is
+   * restarted in the background; the caller still returns immediately.
+   */
+  private async reactivate(state: WorkspaceState): Promise<void> {
+    const engine = this.options.create(state.root)
+    state.engine = engine
+    try {
+      await engine
+    } catch {
+      return
+    }
+    state.engineFailed = false
+    state.error = undefined
+    this.setPhase(state, 'indexing')
+    state.initialIndex = this.indexInitially(state)
+    void state.initialIndex.catch(() => undefined)
   }
 
   async close(): Promise<void> {
@@ -174,23 +193,30 @@ export class WorkspaceSearchRuntime {
       await engine.index({ root: state.root, signal: state.controller.signal })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
+      state.engineFailed = false
       if (state.phase === 'refreshing') this.scheduleRefresh(state)
     } catch (error) {
-      this.setPhase(state, 'error')
-      state.error = error
+      await this.failWorkspace(state, error)
       throw error
     }
   }
 
+  private async failWorkspace(state: WorkspaceState, error: unknown): Promise<void> {
+    this.setPhase(state, 'error')
+    state.error = error
+    // A rejected engine promise never succeeds again, so stop scheduling work that must use it.
+    state.engineFailed = await state.engine.then(() => false, () => true)
+  }
+
   private queuePath(state: WorkspaceState, path: string): void {
-    if (state.controller.signal.aborted) return
+    if (state.controller.signal.aborted || state.engineFailed) return
     state.changedPaths.add(path)
     if (state.phase !== 'indexing') this.setPhase(state, 'refreshing')
     this.scheduleRefresh(state)
   }
 
   private queueReconcile(state: WorkspaceState): void {
-    if (state.controller.signal.aborted) return
+    if (state.controller.signal.aborted || state.engineFailed) return
     state.fullReconcile = true
     if (state.phase !== 'indexing') this.setPhase(state, 'refreshing')
     this.scheduleRefresh(state)
@@ -224,10 +250,7 @@ export class WorkspaceSearchRuntime {
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
     } catch (error) {
-      if (!state.controller.signal.aborted) {
-        this.setPhase(state, 'error')
-        state.error = error
-      }
+      if (!state.controller.signal.aborted) await this.failWorkspace(state, error)
     }
   }
 

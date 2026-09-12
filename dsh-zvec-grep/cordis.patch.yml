@@ -2,6 +2,7 @@
     - id: zvec-grep
       name: '@sugarforever/dsh-zvec-grep'
       config:
+        engineModule: '@zvec/zvec-grep'
         embedding: local/potion-code-16m-v2
         device: auto
         defaultLimit: 10

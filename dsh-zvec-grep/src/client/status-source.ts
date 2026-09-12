@@ -9,28 +9,35 @@ export interface WorkspaceIndexStatus {
   errorCode?: 'index_failed'
 }
 
+export interface WorkspaceStatus extends WorkspaceIndexStatus {
+  root: string
+}
+
 export interface IndexStatusSnapshot {
   connection: 'loading' | 'ready' | 'error'
   status?: WorkspaceIndexStatus
   message?: string
 }
 
-type FetchStatus = (sessionId: string) => Promise<Response>
+type FetchStatus = () => Promise<Response>
 
 const STATUS_PATH = '/api/dsh-zvec-grep/status'
 const ERROR_RETRY_MS = 5000
+const MISSING_WORKSPACE_RETRY_MS = 250
 
 const INITIAL_SNAPSHOT: IndexStatusSnapshot = Object.freeze({ connection: 'loading' })
 
-function parseWorkspace(value: unknown): WorkspaceIndexStatus | undefined {
+function parseWorkspace(value: unknown): WorkspaceStatus | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const item = value as Record<string, unknown>
   if (
-    !['indexing', 'refreshing', 'ready', 'error'].includes(String(item.status))
+    typeof item.root !== 'string' || item.root.length === 0
+    || !['indexing', 'refreshing', 'ready', 'error'].includes(String(item.status))
     || typeof item.pendingChanges !== 'number'
     || typeof item.updatedAt !== 'number'
   ) return undefined
   return Object.freeze({
+    root: item.root,
     status: item.status as IndexPhase,
     pendingChanges: item.pendingChanges,
     updatedAt: item.updatedAt,
@@ -38,15 +45,15 @@ function parseWorkspace(value: unknown): WorkspaceIndexStatus | undefined {
   })
 }
 
-function parsePayload(value: unknown): { pollIntervalMs: number; status: WorkspaceIndexStatus } {
+function parsePayload(value: unknown): { pollIntervalMs: number; workspaces: WorkspaceStatus[] } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('Invalid zvec status response')
   const payload = value as Record<string, unknown>
-  if (payload.version !== 1 || typeof payload.pollIntervalMs !== 'number') {
+  if (payload.version !== 2 || typeof payload.pollIntervalMs !== 'number' || !Array.isArray(payload.workspaces)) {
     throw new Error('Invalid zvec status response')
   }
-  const status = parseWorkspace(payload.status)
-  if (status === undefined) throw new Error('Invalid zvec workspace status')
-  return { pollIntervalMs: payload.pollIntervalMs, status }
+  const workspaces = payload.workspaces.map(parseWorkspace)
+  if (workspaces.some(item => item === undefined)) throw new Error('Invalid zvec workspace status')
+  return { pollIntervalMs: payload.pollIntervalMs, workspaces: workspaces as WorkspaceStatus[] }
 }
 
 export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
@@ -54,10 +61,10 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
   private readonly listeners = new Set<() => void>()
   private timer?: ReturnType<typeof setTimeout>
   private running = false
-  private sessionId?: string
+  private root?: string
   private generation = 0
 
-  constructor(private readonly fetchStatus: FetchStatus = sessionId => fetch(`${STATUS_PATH}?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })) {}
+  constructor(private readonly fetchStatus: FetchStatus = () => fetch(STATUS_PATH, { cache: 'no-store' })) {}
 
   getSnapshot = (): IndexStatusSnapshot => this.snapshot
 
@@ -66,15 +73,15 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
     return () => { this.listeners.delete(listener) }
   }
 
-  selectSession(sessionId: string | undefined): void {
-    if (this.sessionId === sessionId) return
-    const hadSession = this.sessionId !== undefined
-    this.sessionId = sessionId
+  selectWorkspace(root: string | undefined): void {
+    if (this.root === root) return
+    const hadRoot = this.root !== undefined
+    this.root = root
     this.generation += 1
     if (this.timer) clearTimeout(this.timer)
     this.timer = undefined
-    if (hadSession || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT)
-    if (this.running && sessionId !== undefined) void this.poll()
+    if (hadRoot || this.snapshot !== INITIAL_SNAPSHOT) this.publish(INITIAL_SNAPSHOT)
+    if (this.running && root !== undefined) void this.poll()
   }
 
   start(): void {
@@ -91,20 +98,23 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
   }
 
   private async poll(): Promise<void> {
-    const sessionId = this.sessionId
-    if (sessionId === undefined) return
+    const root = this.root
+    if (root === undefined) return
     const generation = this.generation
     let nextDelay = ERROR_RETRY_MS
     try {
-      const response = await this.fetchStatus(sessionId)
+      const response = await this.fetchStatus()
       if (response.status === 404) {
-        nextDelay = 250
+        nextDelay = MISSING_WORKSPACE_RETRY_MS
         if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT)
       } else {
-        if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`)
+        if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for GET ${STATUS_PATH}`)
         const payload = parsePayload(await response.json())
-        nextDelay = Math.max(250, payload.pollIntervalMs)
-        if (this.running && this.generation === generation) this.publish(Object.freeze({ connection: 'ready', status: payload.status }))
+        const status = payload.workspaces.find(item => item.root === root)
+        nextDelay = status === undefined ? MISSING_WORKSPACE_RETRY_MS : Math.max(250, payload.pollIntervalMs)
+        if (this.running && this.generation === generation) {
+          this.publish(status === undefined ? INITIAL_SNAPSHOT : Object.freeze({ connection: 'ready', status }))
+        }
       }
     } catch (error) {
       if (this.running && this.generation === generation) {

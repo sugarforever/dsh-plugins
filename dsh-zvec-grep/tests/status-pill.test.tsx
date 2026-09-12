@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 import { IndexStatusPill, type IndexStatusPillProps } from '../src/client/IndexStatusPill.tsx'
+
+afterEach(() => { cleanup() })
 
 const sessions = {
   ids: ['session'],
@@ -21,7 +23,7 @@ describe('IndexStatusPill', () => {
         connection: 'ready',
         status: { status: 'refreshing', pendingChanges: 2, updatedAt: 42 },
       }),
-      statusSource: { selectSession: () => undefined },
+      statusSource: { selectWorkspace: () => undefined },
     } as unknown as IndexStatusPillProps
     render(<IndexStatusPill {...props} />)
 
@@ -32,12 +34,29 @@ describe('IndexStatusPill', () => {
     expect(screen.getByText(/Pending changes: 2/i)).toBeTruthy()
   })
 
+  it('separates a transport failure from an index failure and names the reason', () => {
+    const props = {
+      useSessions: (selector: (value: typeof sessions) => unknown) => selector(sessions),
+      useIndexStatus: (selector: (value: unknown) => unknown) => selector({
+        connection: 'error',
+        message: 'Zvec status request failed (403) for GET /api/dsh-zvec-grep/status',
+      }),
+      statusSource: { selectWorkspace: () => undefined },
+    } as unknown as IndexStatusPillProps
+    render(<IndexStatusPill {...props} />)
+
+    expect(screen.getByRole('button', { name: /Zvec.*Error/i }).getAttribute('title')).toContain('Zvec status request failed (403)')
+    fireEvent.click(screen.getByRole('button'))
+    expect(screen.getByText('Status unavailable')).toBeTruthy()
+    expect(screen.getByText('Zvec status request failed (403) for GET /api/dsh-zvec-grep/status')).toBeTruthy()
+  })
+
   it('renders nothing without a current workspace', () => {
     const noCurrent = { ...sessions, current: undefined }
     const props = {
       useSessions: (selector: (value: typeof noCurrent) => unknown) => selector(noCurrent),
       useIndexStatus: (selector: (value: unknown) => unknown) => selector({ connection: 'ready' }),
-      statusSource: { selectSession: () => undefined },
+      statusSource: { selectWorkspace: () => undefined },
     } as unknown as IndexStatusPillProps
     const { container } = render(<IndexStatusPill {...props} />)
     expect(container.innerHTML).toBe('')
