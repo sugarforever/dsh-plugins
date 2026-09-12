@@ -71,6 +71,7 @@ function IndexStatusPill(props) {
 	const status = displayStatus(feed);
 	const phase = status?.status ?? "indexing";
 	const label = status === void 0 && feed.connection === "loading" ? "Loading" : labels[phase];
+	const reason = feed.connection === "error" ? feed.message : void 0;
 	return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 		style: styles.anchor,
 		"data-zvec-index-status": phase,
@@ -91,13 +92,17 @@ function IndexStatusPill(props) {
 				status?.errorCode && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 					style: styles.error,
 					children: "Index update failed"
+				}),
+				reason !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+					style: styles.error,
+					children: reason
 				})
 			]
 		}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 			type: "button",
 			"aria-expanded": expanded,
 			"aria-label": `Zvec index ${label}`,
-			title: `Zvec index: ${label}`,
+			title: reason === void 0 ? `Zvec index: ${label}` : `Zvec index: ${label} — ${reason}`,
 			style: styles.button,
 			onClick: () => setExpanded((value) => !value),
 			children: [
@@ -249,12 +254,13 @@ var IndexStatusSource = class {
 		const generation = this.generation;
 		let nextDelay = ERROR_RETRY_MS;
 		try {
+			const requestPath = `${STATUS_PATH}?sessionId=${encodeURIComponent(sessionId)}`;
 			const response = await this.fetchStatus(sessionId);
 			if (response.status === 404) {
 				nextDelay = 250;
 				if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT);
 			} else {
-				if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`);
+				if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for ${requestPath}`);
 				const payload = parsePayload(await response.json());
 				nextDelay = Math.max(250, payload.pollIntervalMs);
 				if (this.running && this.generation === generation) this.publish(Object.freeze({

@@ -50,6 +50,9 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
   const status = displayStatus(feed)
   const phase = status?.status ?? 'indexing'
   const label = status === undefined && feed.connection === 'loading' ? 'Loading' : labels[phase]
+  // The host deliberately never sends its own index-error text, so a failing poll is the only
+  // case that can name a reason: that message is the client's own transport failure.
+  const reason = feed.connection === 'error' ? feed.message : undefined
   return (
     <div style={styles.anchor} data-zvec-index-status={phase}>
       {expanded && (
@@ -59,13 +62,14 @@ export function IndexStatusPill(props: IndexStatusPillProps) {
           <span>Status: {label}</span>
           <span>Pending changes: {status?.pendingChanges ?? 0}</span>
           {status?.errorCode && <span style={styles.error}>Index update failed</span>}
+          {reason !== undefined && <span style={styles.error}>{reason}</span>}
         </div>
       )}
       <button
         type="button"
         aria-expanded={expanded}
         aria-label={`Zvec index ${label}`}
-        title={`Zvec index: ${label}`}
+        title={reason === undefined ? `Zvec index: ${label}` : `Zvec index: ${label} — ${reason}`}
         style={styles.button}
         onClick={() => setExpanded(value => !value)}
       >
