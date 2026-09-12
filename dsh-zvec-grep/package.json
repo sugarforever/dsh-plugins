@@ -59,8 +59,10 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.1",
-    "@zvec/zvec-grep": "^0.2.1",
     "hono": "^4.11.4"
+  },
+  "optionalDependencies": {
+    "@zvec/zvec-grep": "^0.2.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

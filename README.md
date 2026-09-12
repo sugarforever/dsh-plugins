@@ -22,6 +22,8 @@ npx @deepseek-ai/dsh web
 
 插件会自动完成索引初始化，不需要单独安装或启动 `zvec-grep` 服务。Web 界面还会显示索引状态，包括 `Indexing`、`Refreshing`、`Ready` 和 `Error`。
 
+搜索引擎 `@zvec/zvec-grep` 是插件的**可选依赖**：网络正常时会随插件一并安装，安装失败也不会导致插件安装失败。此时插件照常加载，`zvec_search` 返回带修复命令的结构化错误，状态标签显示 `Error`；受限网络下可单独执行 `npm install -g @zvec/zvec-grep`，插件会自动从全局 npm root 解析到它（也可用 `engineModule` 指定路径）。引擎缺失最多每 30 秒重探一次，因此安装后无需重启 Harness。
+
 首次使用时可能需要下载默认的本地嵌入模型。索引保存在工作区的 `.zvec-grep/` 目录中，Node.js 版本要求为 22 或更高。
 
 配置、工作机制和开发命令请参阅 [dsh-zvec-grep/README.md](./dsh-zvec-grep/README.md)。

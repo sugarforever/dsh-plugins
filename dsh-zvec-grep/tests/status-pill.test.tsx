@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 import { IndexStatusPill, type IndexStatusPillProps } from '../src/client/IndexStatusPill.tsx'
+
+afterEach(() => { cleanup() })
 
 const sessions = {
   ids: ['session'],
@@ -30,6 +32,23 @@ describe('IndexStatusPill', () => {
     fireEvent.click(screen.getByRole('button'))
     expect(screen.getByText('/repo')).toBeTruthy()
     expect(screen.getByText(/Pending changes: 2/i)).toBeTruthy()
+  })
+
+  it('names the transport failure instead of only reporting an error', () => {
+    const props = {
+      useSessions: (selector: (value: typeof sessions) => unknown) => selector(sessions),
+      useIndexStatus: (selector: (value: unknown) => unknown) => selector({
+        connection: 'error',
+        message: 'Zvec status request failed (403)',
+      }),
+      statusSource: { selectSession: () => undefined },
+    } as unknown as IndexStatusPillProps
+    render(<IndexStatusPill {...props} />)
+
+    expect(screen.getByRole('button', { name: /Zvec.*Error/i }).getAttribute('title')).toContain('Zvec status request failed (403)')
+    fireEvent.click(screen.getByRole('button'))
+    expect(screen.getByText('Index update failed')).toBeTruthy()
+    expect(screen.getByText('Zvec status request failed (403)')).toBeTruthy()
   })
 
   it('renders nothing without a current workspace', () => {

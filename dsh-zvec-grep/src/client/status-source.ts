@@ -96,12 +96,13 @@ export class IndexStatusSource implements HostObservable<IndexStatusSnapshot> {
     const generation = this.generation
     let nextDelay = ERROR_RETRY_MS
     try {
+      const requestPath = `${STATUS_PATH}?sessionId=${encodeURIComponent(sessionId)}`
       const response = await this.fetchStatus(sessionId)
       if (response.status === 404) {
         nextDelay = 250
         if (this.running && this.generation === generation) this.publish(INITIAL_SNAPSHOT)
       } else {
-        if (!response.ok) throw new Error(`Zvec status request failed (${response.status})`)
+        if (!response.ok) throw new Error(`Zvec status request failed (${response.status}) for ${requestPath}`)
         const payload = parsePayload(await response.json())
         nextDelay = Math.max(250, payload.pollIntervalMs)
         if (this.running && this.generation === generation) this.publish(Object.freeze({ connection: 'ready', status: payload.status }))

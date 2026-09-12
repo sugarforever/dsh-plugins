@@ -1,9 +1,264 @@
 import z from "@deepseek-ai/schemastery";
-import { createZvecGrep } from "@zvec/zvec-grep";
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { realpathSync, watch } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 
+//#region src/engine.ts
+/** Default `engineModule` value: install the engine as an ordinary dependency. */
+const DEFAULT_ENGINE_MODULE = "@zvec/zvec-grep";
+/** Mirrors `optionalDependencies` in package.json; asserted by tests/package-metadata.test.ts. */
+const ENGINE_RANGE = "^0.2.1";
+const ENGINE_INSTALL_COMMAND = "npm install -g @zvec/zvec-grep";
+/**
+* Compares a resolved engine version against the range this plugin was tested with.
+*
+* This is the single place to touch when a new engine line appears: a pre-1.0 engine may break in
+* its minor digit, so `^0.2.1` admits `0.2.x` but not `0.3.x`, while from 1.0 on only the major
+* digit is breaking. The result is a *signal*, never a gate: an out-of-range engine is still
+* resolved and used, because refusing it would fail a workspace for a reason the user cannot act on.
+*/
+function withinTestedRange(version, range = ENGINE_RANGE) {
+	const expected = range.replace(/^[^\d]*/, "").split(".");
+	const actual = version.split(".");
+	if (actual[0] === void 0 || actual[0] !== expected[0]) return false;
+	if (expected[0] !== "0") return true;
+	return actual[1] === expected[1];
+}
+/** How long a failed resolution is reused before another probe is allowed. */
+const ENGINE_RETRY_INTERVAL_MS = 3e4;
+var EngineUnavailableError = class extends Error {
+	constructor(attempts) {
+		super([
+			"dsh-zvec-grep: the optional zvec-grep engine is not installed, so semantic search is unavailable.",
+			`Run: ${ENGINE_INSTALL_COMMAND}`,
+			"Then call zvec_search again. Do not retry zvec_search before the engine is installed.",
+			`If the engine is installed elsewhere, point the plugin option "engineModule" at its entry file, for example: ${DEFAULT_ENGINE_MODULE}`,
+			...attempts.length === 0 ? [] : [`Failed attempts: ${attempts.join("; ")}`]
+		].join("\n"));
+		this.attempts = attempts;
+		this.name = "EngineUnavailableError";
+	}
+};
+const WINDOWS_DRIVE = /^[a-zA-Z]:[\\/]/;
+const NPM_ROOT_TIMEOUT_MS = 1e4;
+function errorMessage$1(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/** True for anything the plugin should treat as a filesystem location rather than a package name. */
+function isPathLike(specifier) {
+	return specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("\\") || specifier.startsWith("file:") || WINDOWS_DRIVE.test(specifier);
+}
+function pickCondition(value) {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			const picked = pickCondition(item);
+			if (picked !== void 0) return picked;
+		}
+		return;
+	}
+	if (value === null || typeof value !== "object") return void 0;
+	const conditions = value;
+	for (const key of [
+		"import",
+		"module",
+		"default",
+		"require",
+		"node"
+	]) {
+		const picked = pickCondition(conditions[key]);
+		if (picked !== void 0) return picked;
+	}
+}
+/** Reads a package directory's declared entry point and version, mirroring Node's ESM conditions. */
+async function readPackageEntry(directory) {
+	let manifest;
+	try {
+		manifest = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
+	} catch {
+		return;
+	}
+	const exports = manifest.exports;
+	const entry = pickCondition(exports !== null && typeof exports === "object" && !Array.isArray(exports) ? exports["."] ?? exports : exports) ?? (typeof manifest.main === "string" ? manifest.main : void 0);
+	if (entry === void 0) return void 0;
+	return {
+		url: pathToFileURL(resolve(directory, entry)).href,
+		...typeof manifest.version === "string" ? { version: manifest.version } : {}
+	};
+}
+/** Extracts the install directory of a package specifier inside a node_modules root. */
+function packageDirectory(root, specifier) {
+	const [first, second] = specifier.split("/");
+	if (first === void 0 || first === "") return void 0;
+	if (!first.startsWith("@")) return join(root, first);
+	if (second === void 0 || second === "") return void 0;
+	return join(root, first, second);
+}
+/** Resolves the global npm root once, walking past any wrapper banner lines npm may print. */
+async function readGlobalNpmRoot(run) {
+	try {
+		return (await run("npm", ["root", "-g"])).split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "").at(-1);
+	} catch {
+		return;
+	}
+}
+function defaultRunner(command, args) {
+	const windows = process.platform === "win32";
+	const file = windows ? process.env.ComSpec ?? "cmd.exe" : command;
+	const argv = windows ? [
+		"/d",
+		"/c",
+		command,
+		...args
+	] : [...args];
+	return new Promise((resolveOutput, rejectOutput) => {
+		execFile(file, argv, {
+			windowsHide: true,
+			timeout: NPM_ROOT_TIMEOUT_MS,
+			encoding: "utf8"
+		}, (error, stdout) => {
+			if (error) {
+				rejectOutput(error);
+				return;
+			}
+			resolveOutput(String(stdout));
+		});
+	});
+}
+function engineFactory(module) {
+	if (module === null || typeof module !== "object") return void 0;
+	const namespace = module;
+	if (typeof namespace.createZvecGrep === "function") return namespace.createZvecGrep;
+	const defaultExport = namespace.default;
+	if (defaultExport !== null && typeof defaultExport === "object") {
+		const nested = defaultExport.createZvecGrep;
+		if (typeof nested === "function") return nested;
+	}
+}
+/**
+* Resolves the optional engine package lazily, so a missing or broken engine never prevents
+* the plugin from loading. Resolution order: an explicit path, the bare specifier (which covers
+* the engine installed next to the plugin), then the global npm root.
+*/
+var EngineLoader = class {
+	specifier;
+	retryIntervalMs;
+	importModule;
+	readGlobalRoot;
+	onWarning;
+	now;
+	globalRoot;
+	loaded;
+	inflight;
+	failure;
+	constructor(options) {
+		this.specifier = options.specifier;
+		this.retryIntervalMs = options.retryIntervalMs ?? ENGINE_RETRY_INTERVAL_MS;
+		this.importModule = options.importModule ?? ((specifier) => import(specifier));
+		this.readGlobalRoot = options.readGlobalRoot ?? (() => readGlobalNpmRoot(defaultRunner));
+		this.onWarning = options.onWarning;
+		this.now = options.now ?? Date.now;
+	}
+	load() {
+		if (this.loaded !== void 0) return this.loaded;
+		if (this.inflight !== void 0) return this.inflight;
+		if (this.failure !== void 0 && this.now() < this.failure.retryAt) return Promise.reject(this.failure.error);
+		const attempt = this.resolve();
+		this.inflight = attempt;
+		attempt.then(() => {
+			this.loaded = attempt;
+			this.failure = void 0;
+		}, (error) => {
+			this.failure = {
+				retryAt: this.now() + this.retryIntervalMs,
+				error: error instanceof EngineUnavailableError ? error : new EngineUnavailableError([errorMessage$1(error)])
+			};
+		}).finally(() => {
+			if (this.inflight === attempt) this.inflight = void 0;
+		});
+		return attempt;
+	}
+	async resolve() {
+		const attempts = [];
+		const explicit = isPathLike(this.specifier);
+		const primary = await this.primaryCandidates(explicit).catch((error) => {
+			attempts.push(`the configured engine location could not be read (${errorMessage$1(error)})`);
+			return [];
+		});
+		for (const candidate of primary) {
+			const loaded = await this.attempt(candidate, attempts);
+			if (loaded !== void 0) return loaded;
+		}
+		if (explicit) throw new EngineUnavailableError(attempts);
+		const global = await this.globalCandidates().catch((error) => {
+			attempts.push(`the global npm root could not be read (${errorMessage$1(error)})`);
+			return [];
+		});
+		for (const candidate of global) {
+			const loaded = await this.attempt(candidate, attempts);
+			if (loaded !== void 0) return loaded;
+		}
+		throw new EngineUnavailableError(attempts);
+	}
+	/** Loads one candidate, recording why it failed instead of aborting the remaining candidates. */
+	async attempt(candidate, attempts) {
+		try {
+			const factory = engineFactory(await this.importModule(candidate.specifier));
+			if (factory === void 0) throw new Error("module does not export createZvecGrep");
+			this.checkVersion(candidate);
+			return {
+				createZvecGrep: async (options) => await factory(options),
+				...candidate.version === void 0 ? {} : { version: candidate.version }
+			};
+		} catch (error) {
+			attempts.push(`${candidate.label} (${errorMessage$1(error)})`);
+			return;
+		}
+	}
+	async primaryCandidates(explicit) {
+		if (!explicit) return [{
+			label: this.specifier,
+			specifier: this.specifier
+		}];
+		const target = this.specifier.startsWith("file:") ? fileURLToPath(this.specifier) : resolve(this.specifier);
+		const entry = await readPackageEntry(target);
+		return entry === void 0 ? [{
+			label: this.specifier,
+			specifier: pathToFileURL(target).href
+		}] : [{
+			label: this.specifier,
+			specifier: entry.url,
+			...entry.version === void 0 ? {} : { version: entry.version }
+		}];
+	}
+	async globalCandidates() {
+		const root = await this.globalNpmRoot();
+		if (root === void 0) return [];
+		const directory = packageDirectory(root, this.specifier);
+		if (directory === void 0) return [];
+		const entry = await readPackageEntry(directory);
+		if (entry === void 0) return [];
+		return [{
+			label: `${this.specifier} from ${root}`,
+			specifier: entry.url,
+			...entry.version === void 0 ? {} : { version: entry.version }
+		}];
+	}
+	globalNpmRoot() {
+		this.globalRoot ??= this.readGlobalRoot();
+		return this.globalRoot;
+	}
+	checkVersion(candidate) {
+		if (candidate.version === void 0 || this.onWarning === void 0) return;
+		if (withinTestedRange(candidate.version)) return;
+		this.onWarning(`dsh-zvec-grep: resolved @zvec/zvec-grep ${candidate.version} from ${candidate.label}, which is outside the tested range ${ENGINE_RANGE}`);
+	}
+};
+
+//#endregion
 //#region src/runtime.ts
 const statusMessages = {
 	indexing: "The workspace index is still being built.",
@@ -37,7 +292,8 @@ var WorkspaceSearchRuntime = class {
 			phase: "indexing",
 			updatedAt: Date.now(),
 			changedPaths: /* @__PURE__ */ new Set(),
-			fullReconcile: false
+			fullReconcile: false,
+			engineFailed: false
 		};
 		this.workspaces.set(root, state);
 		this.startWatcher(state);
@@ -70,29 +326,66 @@ var WorkspaceSearchRuntime = class {
 			this.activate(root).catch(() => void 0);
 			state = this.workspaces.get(root);
 		}
+		const identity = this.engineIdentity();
+		if (state.phase === "error" && state.engineFailed) await this.reactivate(state);
 		if (state.phase === "indexing") return {
 			status: "indexing",
 			root,
-			message: statusMessages.indexing
+			message: statusMessages.indexing,
+			...identity
 		};
 		if (state.phase === "refreshing") return {
 			status: "refreshing",
 			root,
-			message: statusMessages.refreshing
+			message: statusMessages.refreshing,
+			...identity
 		};
 		if (state.phase === "error") return {
 			status: "error",
 			root,
-			message: errorMessage(state.error)
+			message: errorMessage(state.error),
+			...identity
 		};
-		return {
-			status: "ready",
-			result: await (await state.engine).context({
-				...options,
+		const engine = await state.engine;
+		try {
+			return {
+				status: "ready",
+				result: await engine.context({
+					...options,
+					root,
+					autoUpdate: false
+				}),
+				...state.indexInfo === void 0 ? {} : { info: state.indexInfo },
+				...identity
+			};
+		} catch (error) {
+			if (state.controller.signal.aborted) throw error;
+			return {
+				status: "error",
 				root,
-				autoUpdate: false
-			})
-		};
+				message: errorMessage(error),
+				...identity
+			};
+		}
+	}
+	/**
+	* Re-attempts engine resolution for a workspace whose engine never loaded. The engine loader
+	* decides whether another probe is allowed yet, so repeated searches stay cheap. Indexing is
+	* restarted in the background; the caller still returns immediately.
+	*/
+	async reactivate(state) {
+		const engine = this.options.create(state.root);
+		state.engine = engine;
+		try {
+			await engine;
+		} catch {
+			return;
+		}
+		state.engineFailed = false;
+		state.error = void 0;
+		this.setPhase(state, "indexing");
+		state.initialIndex = this.indexInitially(state);
+		state.initialIndex.catch(() => void 0);
 	}
 	async close() {
 		const states = [...this.workspaces.values()];
@@ -121,27 +414,52 @@ var WorkspaceSearchRuntime = class {
 		try {
 			await state.watcher?.ready;
 			state.controller.signal.throwIfAborted();
-			await (await state.engine).index({
+			const engine = await state.engine;
+			await engine.index({
 				root: state.root,
 				signal: state.controller.signal
 			});
+			state.indexInfo = await this.readIndexInfo(engine);
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
+			state.engineFailed = false;
 			if (state.phase === "refreshing") this.scheduleRefresh(state);
 		} catch (error) {
-			this.setPhase(state, "error");
-			state.error = error;
+			await this.failWorkspace(state, error);
 			throw error;
 		}
 	}
+	async failWorkspace(state, error) {
+		this.setPhase(state, "error");
+		state.error = error;
+		state.engineFailed = await state.engine.then(() => false, () => true);
+	}
+	/** Engine identity for an outcome: the resolved version and the range this plugin was tested on. */
+	engineIdentity() {
+		const version = this.options.engineVersion?.();
+		const range = this.options.engineRange;
+		if (version === void 0 && range === void 0) return {};
+		return { engine: {
+			...version === void 0 ? {} : { version },
+			...range === void 0 ? {} : { range }
+		} };
+	}
+	/** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
+	async readIndexInfo(engine) {
+		try {
+			return await engine.info?.();
+		} catch {
+			return;
+		}
+	}
 	queuePath(state, path) {
-		if (state.controller.signal.aborted) return;
+		if (state.controller.signal.aborted || state.engineFailed) return;
 		state.changedPaths.add(path);
 		if (state.phase !== "indexing") this.setPhase(state, "refreshing");
 		this.scheduleRefresh(state);
 	}
 	queueReconcile(state) {
-		if (state.controller.signal.aborted) return;
+		if (state.controller.signal.aborted || state.engineFailed) return;
 		state.fullReconcile = true;
 		if (state.phase !== "indexing") this.setPhase(state, "refreshing");
 		this.scheduleRefresh(state);
@@ -164,18 +482,17 @@ var WorkspaceSearchRuntime = class {
 		state.fullReconcile = false;
 		state.changedPaths.clear();
 		try {
-			await (await state.engine).index({
+			const engine = await state.engine;
+			await engine.index({
 				root: state.root,
 				signal: state.controller.signal,
 				...fullReconcile ? {} : { changedPaths }
 			});
+			state.indexInfo = await this.readIndexInfo(engine);
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
 		} catch (error) {
-			if (!state.controller.signal.aborted) {
-				this.setPhase(state, "error");
-				state.error = error;
-			}
+			if (!state.controller.signal.aborted) await this.failWorkspace(state, error);
 		}
 	}
 	setPhase(state, phase) {
@@ -199,16 +516,63 @@ function lineRange(item) {
 	};
 	return {};
 }
-function projectResult(result) {
+/** What the engine says this fragment is: a code symbol or a markdown heading. */
+function describeItem(item) {
+	const metadata = item.metadata;
+	if (metadata === void 0) return {};
+	const symbol = metadata.symbolType !== void 0 && metadata.symbolName !== void 0 ? `${metadata.symbolType} ${metadata.symbolName}` : void 0;
+	const scope = typeof metadata.scope === "string" && metadata.scope.length > 0 ? metadata.scope : void 0;
+	return {
+		...symbol === void 0 ? {} : { symbol },
+		...metadata.heading === void 0 ? {} : { heading: metadata.heading },
+		...scope === void 0 ? {} : { scope }
+	};
+}
+/** Which routes ran and how long the search took, so a thin answer can explain itself. */
+function projectDiagnostics(result) {
+	const hits = result.diagnostics?.index?.hitsReturned;
+	const routes = result.diagnostics?.index?.routes?.map((route) => route.mode).filter((mode) => typeof mode === "string");
+	const totalMs = result.diagnostics?.timings?.find((entry) => entry.name === "total")?.durationMs;
+	return {
+		...hits === void 0 ? {} : { hits },
+		...routes === void 0 || routes.length === 0 ? {} : { routes: routes.join(",") },
+		...totalMs === void 0 ? {} : { totalMs }
+	};
+}
+/** How much the workspace index actually covers right now. */
+function projectIndexCounts(info) {
+	const status = info?.status;
+	if (status === void 0) return void 0;
+	return {
+		...status.filesIndexed === void 0 ? {} : { files: status.filesIndexed },
+		...status.entitiesIndexed === void 0 ? {} : { entities: status.entitiesIndexed },
+		...status.fragmentsTruncated === void 0 ? {} : { truncated: status.fragmentsTruncated },
+		...status.filesFailed === void 0 ? {} : { failed: status.filesFailed }
+	};
+}
+/** An out-of-range engine keeps working, but an upgrade should be visible, not only logged. */
+function versionWarning(engine) {
+	if (engine?.version === void 0 || engine.range === void 0) return void 0;
+	if (withinTestedRange(engine.version, engine.range)) return void 0;
+	return `resolved @zvec/zvec-grep ${engine.version} is outside the range this plugin was tested against (${engine.range}); the plugin still uses it`;
+}
+function projectResult(result, info, engine) {
+	const indexed = projectIndexCounts(info);
+	const warning = versionWarning(engine) ?? (indexed?.files === 0 ? `the workspace index holds no files for ${result.root}; check that the session workspace is the code root (nested git repositories are excluded)` : void 0);
 	return {
 		status: "ready",
 		query: result.query,
 		root: result.root,
 		source: result.source,
 		coverage: result.coverage,
+		diagnostics: projectDiagnostics(result),
+		...indexed === void 0 ? {} : { indexed },
+		...engine === void 0 ? {} : { engine },
+		...warning === void 0 ? {} : { warning },
 		results: result.items.map((item) => ({
 			path: item.file.relativePath,
 			...lineRange(item),
+			...describeItem(item),
 			content: item.content,
 			status: item.status,
 			matchedBy: Array.isArray(item.matchedBy) ? item.matchedBy.join(",") : String(item.matchedBy),
@@ -217,12 +581,12 @@ function projectResult(result) {
 	};
 }
 function project(outcome) {
-	return outcome.status === "ready" ? projectResult(outcome.result) : outcome;
+	return outcome.status === "ready" ? projectResult(outcome.result, outcome.info, outcome.engine) : outcome;
 }
 function createSearchTool(runtime, config) {
 	return defineTool({
 		name: "zvec_search",
-		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready. Use exact grep for known literals or exhaustive matches.",
+		description: "Search the current workspace by meaning, concepts, architecture, relationships, and data flow. Returns indexing or refreshing status immediately when the background index is not ready, and an error status carrying the install command when the optional zvec-grep engine is not available. Each hit names the symbol or heading it matched, indexed reports how many files the workspace index actually holds - a very small count means the session workspace is not the code root, and engine reports the resolved @zvec/zvec-grep version plus the range this plugin was tested against. Use exact grep for known literals or exhaustive matches.",
 		parameters: {
 			query: {
 				type: "string",
@@ -248,9 +612,37 @@ function createSearchTool(runtime, config) {
 						required: true
 					},
 					message: { type: "string" },
+					warning: { type: "string" },
 					query: { type: "string" },
 					source: { type: "string" },
 					coverage: { type: "string" },
+					diagnostics: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							hits: { type: "integer" },
+							routes: { type: "string" },
+							totalMs: { type: "number" }
+						}
+					},
+					indexed: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							files: { type: "integer" },
+							entities: { type: "integer" },
+							truncated: { type: "integer" },
+							failed: { type: "integer" }
+						}
+					},
+					engine: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							version: { type: "string" },
+							range: { type: "string" }
+						}
+					},
 					results: {
 						type: "array",
 						items: {
@@ -263,6 +655,9 @@ function createSearchTool(runtime, config) {
 								},
 								startLine: { type: "integer" },
 								endLine: { type: "integer" },
+								symbol: { type: "string" },
+								heading: { type: "string" },
+								scope: { type: "string" },
 								content: {
 									type: "string",
 									required: true
@@ -373,6 +768,7 @@ const inject = [
 	"systemPrompt"
 ];
 const Config = z.object({
+	engineModule: z.string().default(DEFAULT_ENGINE_MODULE),
 	embedding: z.string().default("local/potion-code-16m-v2"),
 	device: z.union([
 		"auto",
@@ -408,12 +804,25 @@ function mountPlugin(ctx, runtime, config) {
 }
 function apply(ctx, config) {
 	if ((config.defaultLimit ?? 10) > (config.maxLimit ?? 30)) throw new Error("dsh-zvec-grep: defaultLimit cannot exceed maxLimit");
+	const embedding = config.embedding ?? "local/potion-code-16m-v2";
+	const device = config.device ?? "auto";
+	const engines = new EngineLoader({
+		specifier: config.engineModule ?? DEFAULT_ENGINE_MODULE,
+		onWarning: (message) => ctx.logger.warn(message)
+	});
+	let engineVersion;
 	const runtime = new WorkspaceSearchRuntime({
-		create: (root) => createZvecGrep({
-			root,
-			embedding: config.embedding ?? "local/potion-code-16m-v2",
-			device: config.device ?? "auto"
-		}),
+		create: async (root) => {
+			const engineModule = await engines.load();
+			engineVersion = engineModule.version;
+			return engineModule.createZvecGrep({
+				root,
+				embedding,
+				device
+			});
+		},
+		engineVersion: () => engineVersion,
+		engineRange: ENGINE_RANGE,
 		watch: createWorkspaceWatcher,
 		debounceMs: config.watchDebounceMs ?? 750,
 		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5

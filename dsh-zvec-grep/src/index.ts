@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import z from '@deepseek-ai/schemastery'
-import { createZvecGrep } from '@zvec/zvec-grep'
+import { DEFAULT_ENGINE_MODULE, ENGINE_RANGE, EngineLoader } from './engine.ts'
 import { WorkspaceSearchRuntime } from './runtime.ts'
 import { createSearchTool, type SearchToolConfig } from './tool.ts'
 import { createWorkspaceWatcher } from './watcher.ts'
@@ -12,6 +12,7 @@ export const name = 'dsh-zvec-grep'
 export const inject = ['sessions', 'tools', 'systemPrompt']
 
 export interface Config {
+  engineModule?: string
   embedding?: string
   device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda'
   defaultLimit?: number
@@ -22,6 +23,7 @@ export interface Config {
 }
 
 export const Config: z<Config> = z.object({
+  engineModule: z.string().default(DEFAULT_ENGINE_MODULE),
   embedding: z.string().default('local/potion-code-16m-v2'),
   device: z.union(['auto', 'cpu', 'metal', 'vulkan', 'cuda']).default('auto'),
   defaultLimit: z.number().step(1).min(1).max(30).default(10),
@@ -54,12 +56,24 @@ export function apply(ctx: Context, config: Config): void {
   if ((config.defaultLimit ?? 10) > (config.maxLimit ?? 30)) {
     throw new Error('dsh-zvec-grep: defaultLimit cannot exceed maxLimit')
   }
+  const embedding = config.embedding ?? 'local/potion-code-16m-v2'
+  const device = config.device ?? 'auto'
+  const engines = new EngineLoader({
+    specifier: config.engineModule ?? DEFAULT_ENGINE_MODULE,
+    onWarning: message => ctx.logger.warn(message),
+  })
+  // The resolved engine version is diagnostics: `zvec_search` reports it so an engine upgrade is
+  // visible in the result instead of only in the log.
+  let engineVersion: string | undefined
   const runtime = new WorkspaceSearchRuntime({
-    create: root => createZvecGrep({
-      root,
-      embedding: config.embedding ?? 'local/potion-code-16m-v2',
-      device: config.device ?? 'auto',
-    }),
+    // Resolved lazily so a missing engine package never blocks plugin activation.
+    create: async root => {
+      const engineModule = await engines.load()
+      engineVersion = engineModule.version
+      return engineModule.createZvecGrep({ root, embedding, device })
+    },
+    engineVersion: () => engineVersion,
+    engineRange: ENGINE_RANGE,
     watch: createWorkspaceWatcher,
     debounceMs: config.watchDebounceMs ?? 750,
     reconcileIntervalMs: config.reconcileIntervalMs ?? 3_600_000,

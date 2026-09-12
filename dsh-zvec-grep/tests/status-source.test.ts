@@ -38,6 +38,20 @@ describe('IndexStatusSource', () => {
     source.stop()
   })
 
+  it('names the requested status path when the host rejects the poll', async () => {
+    vi.useFakeTimers()
+    const source = new IndexStatusSource(vi.fn(async () => new Response('missing sessionId', { status: 400 })))
+    source.selectSession('session-A')
+    source.start()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(source.getSnapshot()).toEqual(expect.objectContaining({
+      connection: 'error',
+      message: 'Zvec status request failed (400) for /api/dsh-zvec-grep/status?sessionId=session-A',
+    }))
+    source.stop()
+  })
+
   it('keeps loading and retries quickly when the session is not restored yet', async () => {
     vi.useFakeTimers()
     const fetchStatus = vi.fn(async () => new Response('not found', { status: 404 }))
