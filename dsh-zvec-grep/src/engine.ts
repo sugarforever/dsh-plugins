@@ -16,6 +16,18 @@ export type ZvecItemRange =
   | { kind: 'page' | 'page_text'; page: number }
   | { kind: 'file' | 'byte' | 'page_region' }
 
+/** Entity annotation the engine attaches to each indexed fragment (observed on 0.2.2 payloads). */
+export interface ZvecEntityMetadata {
+  kind?: string
+  symbolType?: string
+  symbolName?: string
+  signature?: string
+  modifiers?: readonly string[]
+  heading?: string
+  level?: number
+  scope?: string | null
+}
+
 export interface ZvecContextItem {
   file: { relativePath: string }
   range: ZvecItemRange
@@ -24,6 +36,18 @@ export interface ZvecContextItem {
   status: 'fresh' | 'possibly_stale'
   matchedBy: string | readonly string[]
   score?: number
+  kind?: string
+  rank?: number
+  metadata?: ZvecEntityMetadata
+}
+
+/** How the engine ranked what it returned, and how long each phase took. */
+export interface ZvecContextDiagnostics {
+  index?: {
+    hitsReturned?: number
+    routes?: readonly { mode?: string }[]
+  }
+  timings?: readonly { name?: string; durationMs?: number }[]
 }
 
 export interface ZvecContextResult {
@@ -32,6 +56,22 @@ export interface ZvecContextResult {
   source: 'index' | 'rg'
   coverage: 'ranked_sample' | 'rg_exhaustive' | 'rg_truncated'
   items: ZvecContextItem[]
+  diagnostics?: ZvecContextDiagnostics
+}
+
+/** What the workspace index currently covers, as reported by the engine's `info()`. */
+export interface ZvecIndexCounts {
+  filesScanned?: number
+  filesIndexed?: number
+  entitiesIndexed?: number
+  fragmentsTruncated?: number
+  filesPending?: number
+  filesFailed?: number
+}
+
+export interface ZvecEngineInfo {
+  indexed?: boolean
+  status?: ZvecIndexCounts
 }
 
 export interface ZvecIndexOptions {
@@ -56,12 +96,15 @@ export interface ZvecEngineOptions {
 export interface SearchEngine {
   index(options?: ZvecIndexOptions): Promise<unknown>
   context(options: ZvecContextOptions): Promise<ZvecContextResult>
+  info?(): Promise<ZvecEngineInfo>
   close(): Promise<void>
 }
 
 /** The engine package surface this plugin resolves, without depending on the package itself. */
 export interface ZvecGrepModule {
   createZvecGrep(options: ZvecEngineOptions): Promise<SearchEngine>
+  /** Version read from the resolved package manifest, when it declares one. */
+  version?: string
 }
 
 /** Default `engineModule` value: install the engine as an ordinary dependency. */
@@ -71,6 +114,22 @@ export const DEFAULT_ENGINE_MODULE = '@zvec/zvec-grep'
 export const ENGINE_RANGE = '^0.2.1'
 
 export const ENGINE_INSTALL_COMMAND = 'npm install -g @zvec/zvec-grep'
+
+/**
+ * Compares a resolved engine version against the range this plugin was tested with.
+ *
+ * This is the single place to touch when a new engine line appears: a pre-1.0 engine may break in
+ * its minor digit, so `^0.2.1` admits `0.2.x` but not `0.3.x`, while from 1.0 on only the major
+ * digit is breaking. The result is a *signal*, never a gate: an out-of-range engine is still
+ * resolved and used, because refusing it would fail a workspace for a reason the user cannot act on.
+ */
+export function withinTestedRange(version: string, range: string = ENGINE_RANGE): boolean {
+  const expected = range.replace(/^[^\d]*/, '').split('.')
+  const actual = version.split('.')
+  if (actual[0] === undefined || actual[0] !== expected[0]) return false
+  if (expected[0] !== '0') return true
+  return actual[1] === expected[1]
+}
 
 /** How long a failed resolution is reused before another probe is allowed. */
 export const ENGINE_RETRY_INTERVAL_MS = 30_000
@@ -301,6 +360,7 @@ export class EngineLoader {
       this.checkVersion(candidate)
       return {
         createZvecGrep: async options => (await factory(options)) as SearchEngine,
+        ...(candidate.version === undefined ? {} : { version: candidate.version }),
       }
     } catch (error) {
       attempts.push(`${candidate.label} (${errorMessage(error)})`)
@@ -340,8 +400,7 @@ export class EngineLoader {
 
   private checkVersion(candidate: Candidate): void {
     if (candidate.version === undefined || this.onWarning === undefined) return
-    const expected = ENGINE_RANGE.replace(/^[^\d]*/, '').split('.')[0]
-    if (expected === undefined || expected === '' || candidate.version.split('.')[0] === expected) return
+    if (withinTestedRange(candidate.version)) return
     this.onWarning(`dsh-zvec-grep: resolved @zvec/zvec-grep ${candidate.version} from ${candidate.label}, which is outside the tested range ${ENGINE_RANGE}`)
   }
 }

@@ -1,6 +1,6 @@
 import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecIndexOptions } from './engine.ts'
+import type { SearchEngine, ZvecContextOptions, ZvecContextResult, ZvecEngineInfo, ZvecIndexOptions } from './engine.ts'
 
 export type { SearchEngine } from './engine.ts'
 
@@ -15,10 +15,16 @@ export interface WorkspaceWatchCallbacks {
 }
 
 export type WorkspaceSearchOutcome =
-  | { status: 'indexing'; root: string; message: string }
-  | { status: 'refreshing'; root: string; message: string }
-  | { status: 'error'; root: string; message: string }
-  | { status: 'ready'; result: ZvecContextResult }
+  | { status: 'indexing'; root: string; message: string; engine?: WorkspaceEngineIdentity }
+  | { status: 'refreshing'; root: string; message: string; engine?: WorkspaceEngineIdentity }
+  | { status: 'error'; root: string; message: string; engine?: WorkspaceEngineIdentity }
+  | { status: 'ready'; result: ZvecContextResult; info?: ZvecEngineInfo; engine?: WorkspaceEngineIdentity }
+
+/** Engine identity attached to every outcome, so a version mismatch is visible where it hurts. */
+export interface WorkspaceEngineIdentity {
+  version?: string
+  range?: string
+}
 
 export interface WorkspaceIndexStatus {
   root: string
@@ -33,6 +39,10 @@ export interface WorkspaceSearchRuntimeOptions {
   watch?: (root: string, callbacks: WorkspaceWatchCallbacks) => WorkspaceWatcher
   debounceMs?: number
   reconcileIntervalMs?: number
+  /** Version of the engine the loader resolved, once it has one; reported back as diagnostics. */
+  engineVersion?: () => string | undefined
+  /** The engine range this plugin was tested against; reported back as diagnostics. */
+  engineRange?: string
 }
 
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error'
@@ -52,6 +62,8 @@ interface WorkspaceState {
   changedPaths: Set<string>
   fullReconcile: boolean
   engineFailed: boolean
+  /** Coverage counts captured after the last index run; they only move when the index does. */
+  indexInfo?: ZvecEngineInfo
 }
 
 const statusMessages = {
@@ -128,14 +140,23 @@ export class WorkspaceSearchRuntime {
       void this.activate(root).catch(() => undefined)
       state = this.workspaces.get(root)!
     }
+    const identity = this.engineIdentity()
     if (state.phase === 'error' && state.engineFailed) await this.reactivate(state)
-    if (state.phase === 'indexing') return { status: 'indexing', root, message: statusMessages.indexing }
-    if (state.phase === 'refreshing') return { status: 'refreshing', root, message: statusMessages.refreshing }
-    if (state.phase === 'error') return { status: 'error', root, message: errorMessage(state.error) }
+    if (state.phase === 'indexing') return { status: 'indexing', root, message: statusMessages.indexing, ...identity }
+    if (state.phase === 'refreshing') return { status: 'refreshing', root, message: statusMessages.refreshing, ...identity }
+    if (state.phase === 'error') return { status: 'error', root, message: errorMessage(state.error), ...identity }
 
     const engine = await state.engine
-    const result = await engine.context({ ...options, root, autoUpdate: false })
-    return { status: 'ready', result }
+    try {
+      const result = await engine.context({ ...options, root, autoUpdate: false })
+      return { status: 'ready', result, ...(state.indexInfo === undefined ? {} : { info: state.indexInfo }), ...identity }
+    } catch (error) {
+      if (state.controller.signal.aborted) throw error
+      // A search failure is either transient (a concurrent index run holds the index write lock) or
+      // an engine/index format mismatch after an upgrade. Report it instead of throwing, and leave
+      // the workspace phase alone so the next search retries naturally.
+      return { status: 'error', root, message: errorMessage(error), ...identity }
+    }
   }
 
   /**
@@ -191,6 +212,7 @@ export class WorkspaceSearchRuntime {
       state.controller.signal.throwIfAborted()
       const engine = await state.engine
       await engine.index({ root: state.root, signal: state.controller.signal })
+      state.indexInfo = await this.readIndexInfo(engine)
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
       state.engineFailed = false
@@ -206,6 +228,28 @@ export class WorkspaceSearchRuntime {
     state.error = error
     // A rejected engine promise never succeeds again, so stop scheduling work that must use it.
     state.engineFailed = await state.engine.then(() => false, () => true)
+  }
+
+  /** Engine identity for an outcome: the resolved version and the range this plugin was tested on. */
+  private engineIdentity(): { engine?: WorkspaceEngineIdentity } {
+    const version = this.options.engineVersion?.()
+    const range = this.options.engineRange
+    if (version === undefined && range === undefined) return {}
+    return {
+      engine: {
+        ...(version === undefined ? {} : { version }),
+        ...(range === undefined ? {} : { range }),
+      },
+    }
+  }
+
+  /** Coverage counts are diagnostics: an engine without `info()` must not break indexing. */
+  private async readIndexInfo(engine: SearchEngine): Promise<ZvecEngineInfo | undefined> {
+    try {
+      return await engine.info?.()
+    } catch {
+      return undefined
+    }
   }
 
   private queuePath(state: WorkspaceState, path: string): void {
@@ -247,6 +291,7 @@ export class WorkspaceSearchRuntime {
         signal: state.controller.signal,
         ...(fullReconcile ? {} : { changedPaths }),
       })
+      state.indexInfo = await this.readIndexInfo(engine)
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
     } catch (error) {

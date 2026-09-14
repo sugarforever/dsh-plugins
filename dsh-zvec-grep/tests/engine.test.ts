@@ -216,7 +216,7 @@ describe('EngineLoader resolution', () => {
     await expect(loader.load()).resolves.toMatchObject({ createZvecGrep: expect.any(Function) })
   })
 
-  it('warns softly when the resolved engine leaves the tested major range', async () => {
+  it('warns softly when the resolved engine leaves the tested range', async () => {
     const root = await scratch()
     await writeEnginePackage(root, '1.0.0')
     const onWarning = vi.fn()
@@ -232,6 +232,24 @@ describe('EngineLoader resolution', () => {
 
     await loader.load()
     expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('1.0.0'))
+  })
+
+  it('warns softly when a pre-1.0 engine moves to another minor', async () => {
+    const root = await scratch()
+    await writeEnginePackage(root, '0.3.0')
+    const onWarning = vi.fn()
+    const loader = new EngineLoader({
+      specifier: '@zvec/zvec-grep',
+      importModule: async (specifier: string) => {
+        if (specifier === '@zvec/zvec-grep') throw new Error('ERR_MODULE_NOT_FOUND')
+        return engineStub
+      },
+      readGlobalRoot: async () => root,
+      onWarning,
+    })
+
+    await loader.load()
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('0.3.0'))
   })
 
   it('does not warn for a matching major version', async () => {
