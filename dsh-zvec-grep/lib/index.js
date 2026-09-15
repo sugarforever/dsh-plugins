@@ -330,7 +330,8 @@ var WorkspaceSearchRuntime = class {
 			result: await (await state.engine).context({
 				...options,
 				root,
-				autoUpdate: false
+				autoUpdate: false,
+				...this.excludeFilter()
 			})
 		};
 	}
@@ -382,7 +383,8 @@ var WorkspaceSearchRuntime = class {
 			state.controller.signal.throwIfAborted();
 			await (await state.engine).index({
 				root: state.root,
-				signal: state.controller.signal
+				signal: state.controller.signal,
+				...this.excludeFilter()
 			});
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
@@ -431,7 +433,8 @@ var WorkspaceSearchRuntime = class {
 			await (await state.engine).index({
 				root: state.root,
 				signal: state.controller.signal,
-				...fullReconcile ? {} : { changedPaths }
+				...fullReconcile ? {} : { changedPaths },
+				...this.excludeFilter()
 			});
 			this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? "refreshing" : "ready");
 			state.error = void 0;
@@ -443,6 +446,11 @@ var WorkspaceSearchRuntime = class {
 		if (state.phase === phase) return;
 		state.phase = phase;
 		state.updatedAt = Date.now();
+	}
+	/** Omitted entirely when empty, so the engine sees no filter key at all by default. */
+	excludeFilter() {
+		const excludePaths = this.options.excludePaths;
+		return excludePaths && excludePaths.length > 0 ? { excludePaths } : {};
 	}
 };
 
@@ -659,6 +667,7 @@ const Config = z.object({
 		"vulkan",
 		"cuda"
 	]).default("auto"),
+	excludePaths: z.array(z.string()).default([]),
 	defaultLimit: z.number().step(1).min(1).max(30).default(10),
 	maxLimit: z.number().step(1).min(1).max(100).default(30),
 	watchDebounceMs: z.number().step(1).min(50).max(3e4).default(750),
@@ -700,7 +709,8 @@ function apply(ctx, config) {
 		}),
 		watch: createWorkspaceWatcher,
 		debounceMs: config.watchDebounceMs ?? 750,
-		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5
+		reconcileIntervalMs: config.reconcileIntervalMs ?? 36e5,
+		excludePaths: config.excludePaths ?? []
 	});
 	mountPlugin(ctx, runtime, {
 		defaultLimit: config.defaultLimit ?? 10,

@@ -15,6 +15,8 @@ export interface Config {
   engineModule?: string
   embedding?: string
   device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda'
+  /** Workspace-relative paths or globs the engine must never index or search. */
+  excludePaths?: string[]
   defaultLimit?: number
   maxLimit?: number
   watchDebounceMs?: number
@@ -26,6 +28,7 @@ export const Config: z<Config> = z.object({
   engineModule: z.string().default(DEFAULT_ENGINE_MODULE),
   embedding: z.string().default('local/potion-code-16m-v2'),
   device: z.union(['auto', 'cpu', 'metal', 'vulkan', 'cuda']).default('auto'),
+  excludePaths: z.array(z.string()).default([]),
   defaultLimit: z.number().step(1).min(1).max(30).default(10),
   maxLimit: z.number().step(1).min(1).max(100).default(30),
   watchDebounceMs: z.number().step(1).min(50).max(30_000).default(750),
@@ -68,6 +71,7 @@ export function apply(ctx: Context, config: Config): void {
     watch: createWorkspaceWatcher,
     debounceMs: config.watchDebounceMs ?? 750,
     reconcileIntervalMs: config.reconcileIntervalMs ?? 3_600_000,
+    excludePaths: config.excludePaths ?? [],
   })
   mountPlugin(ctx, runtime, {
     defaultLimit: config.defaultLimit ?? 10,

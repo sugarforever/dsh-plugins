@@ -78,6 +78,7 @@ The bundled defaults work without configuration:
     engineModule: '@zvec/zvec-grep'
     embedding: local/potion-code-16m-v2
     device: auto
+    excludePaths: []
     defaultLimit: 10
     maxLimit: 30
     watchDebounceMs: 750
@@ -86,6 +87,20 @@ The bundled defaults work without configuration:
 ```
 
 Node.js 22 or newer is required. `engineModule` accepts a package specifier, an absolute or relative filesystem path, or a `file:` URL; it is resolved lazily, in the order explicit location, bare specifier, then the global npm root. `device` accepts `auto`, `cpu`, `metal`, `vulkan`, or `cuda`. `reconcileIntervalMs: 0` disables periodic reconciliation; the default is one hour. `statusPollIntervalMs` controls the lightweight workspace-status UI refresh interval and defaults to two seconds.
+
+### excludePaths
+
+`excludePaths` lists workspace-relative paths or glob patterns the engine must never index or search. Entries are matched against paths relative to the workspace root: a bare directory name matches only a directory at the workspace root (`secret` excludes `secret/**`), so nested directories need their own prefix - e.g. `src/vendor/**` or `docs/generated/**`. The filter is applied to the initial index, every incremental update and reconciliation, and searches (including the rg fallback, which reads it from the call options rather than the persisted manifest).
+
+```yaml
+config:
+  excludePaths:
+    - vendor
+    - src/vendor/**
+    - docs/generated/**
+```
+
+Use it for directories that stay in version control but carry no semantic search value, or that are maintained by other tooling. It is additive on top of the engine's built-in rules (`.gitignore`, hidden directories, and common build/Vendored defaults such as `node_modules` and `dist`); configured paths are persisted into the workspace manifest, so changing the list takes effect on the next index pass of each workspace.
 
 ## Development
 

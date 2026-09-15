@@ -8,6 +8,8 @@ export interface Config {
     engineModule?: string;
     embedding?: string;
     device?: 'auto' | 'cpu' | 'metal' | 'vulkan' | 'cuda';
+    /** Workspace-relative paths or globs the engine must never index or search. */
+    excludePaths?: string[];
     defaultLimit?: number;
     maxLimit?: number;
     watchDebounceMs?: number;

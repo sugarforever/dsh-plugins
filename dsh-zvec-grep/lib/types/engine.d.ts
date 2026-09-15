@@ -37,6 +37,8 @@ export interface ZvecContextResult {
 export interface ZvecIndexOptions {
     root?: string;
     changedPaths?: readonly string[];
+    /** Workspace-relative or glob paths the engine must never index (persisted into the manifest). */
+    excludePaths?: readonly string[];
     signal?: AbortSignal;
 }
 export interface ZvecContextOptions {
@@ -44,6 +46,8 @@ export interface ZvecContextOptions {
     limit?: number;
     root?: string;
     autoUpdate?: boolean;
+    /** Same filter set as `index`; the rg fallback reads it from call options, not the manifest. */
+    excludePaths?: readonly string[];
 }
 export interface ZvecEngineOptions {
     root: string;

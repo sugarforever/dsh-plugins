@@ -33,6 +33,8 @@ export interface WorkspaceSearchRuntimeOptions {
   watch?: (root: string, callbacks: WorkspaceWatchCallbacks) => WorkspaceWatcher
   debounceMs?: number
   reconcileIntervalMs?: number
+  /** Paths excluded from every index and search call; empty or undefined means no filter. */
+  excludePaths?: readonly string[]
 }
 
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error'
@@ -134,7 +136,7 @@ export class WorkspaceSearchRuntime {
     if (state.phase === 'error') return { status: 'error', root, message: errorMessage(state.error) }
 
     const engine = await state.engine
-    const result = await engine.context({ ...options, root, autoUpdate: false })
+    const result = await engine.context({ ...options, root, autoUpdate: false, ...this.excludeFilter() })
     return { status: 'ready', result }
   }
 
@@ -190,7 +192,7 @@ export class WorkspaceSearchRuntime {
       await state.watcher?.ready
       state.controller.signal.throwIfAborted()
       const engine = await state.engine
-      await engine.index({ root: state.root, signal: state.controller.signal })
+      await engine.index({ root: state.root, signal: state.controller.signal, ...this.excludeFilter() })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
       state.engineFailed = false
@@ -246,6 +248,7 @@ export class WorkspaceSearchRuntime {
         root: state.root,
         signal: state.controller.signal,
         ...(fullReconcile ? {} : { changedPaths }),
+        ...this.excludeFilter(),
       })
       this.setPhase(state, state.changedPaths.size > 0 || state.fullReconcile ? 'refreshing' : 'ready')
       state.error = undefined
@@ -258,5 +261,11 @@ export class WorkspaceSearchRuntime {
     if (state.phase === phase) return
     state.phase = phase
     state.updatedAt = Date.now()
+  }
+
+  /** Omitted entirely when empty, so the engine sees no filter key at all by default. */
+  private excludeFilter(): { excludePaths?: readonly string[] } {
+    const excludePaths = this.options.excludePaths
+    return excludePaths && excludePaths.length > 0 ? { excludePaths } : {}
   }
 }

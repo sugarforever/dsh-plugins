@@ -36,6 +36,8 @@ export interface WorkspaceSearchRuntimeOptions {
     watch?: (root: string, callbacks: WorkspaceWatchCallbacks) => WorkspaceWatcher;
     debounceMs?: number;
     reconcileIntervalMs?: number;
+    /** Paths excluded from every index and search call; empty or undefined means no filter. */
+    excludePaths?: readonly string[];
 }
 type Phase = 'indexing' | 'refreshing' | 'ready' | 'error';
 export declare class WorkspaceSearchRuntime {
@@ -62,5 +64,7 @@ export declare class WorkspaceSearchRuntime {
     private scheduleRefresh;
     private refresh;
     private setPhase;
+    /** Omitted entirely when empty, so the engine sees no filter key at all by default. */
+    private excludeFilter;
 }
 //# sourceMappingURL=runtime.d.ts.map
